@@ -1,66 +1,79 @@
-"""AI writing helpers for generating titles, summaries and styled drafts."""
 from __future__ import annotations
 
-import textwrap
-from typing import Dict, List, Mapping
+from dataclasses import dataclass
+from typing import List
 
 
-def _select_source_text(item: Mapping[str, str]) -> str:
-    for key in ("text", "content", "message", "body"):
-        value = item.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
+@dataclass
+class DraftOutput:
+    title: str
+    summary_facts: str
+    draft: str
 
 
-def generate_title(source_text: str, fallback: str | None = None) -> str:
-    if not source_text and fallback:
+def _make_title(raw: str, fallback: str = "Crypto update") -> str:
+    text = (raw or "").strip()
+    if not text:
         return fallback
-    if not source_text:
+    first = text.splitlines()[0].strip()
+    return first if len(first) <= 120 else first[:117] + "..."
+
+
+def _facts_summary(raw: str, max_bullets: int = 4) -> str:
+    text = (raw or "").strip()
+    if not text:
         return ""
-    words = source_text.split()
-    trimmed = " ".join(words[:12]).rstrip("., ")
-    return trimmed
-
-
-def summarize_facts(source_text: str, max_bullets: int = 3) -> List[str]:
-    if not source_text:
-        return []
-    sentences = [part.strip() for part in source_text.replace("\n", " ").split(".") if part.strip()]
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     bullets: List[str] = []
-    for sentence in sentences[:max_bullets]:
-        bullets.append(sentence)
-    return bullets
+    for ln in lines:
+        if len(bullets) >= max_bullets:
+            break
+        if len(ln) > 240:
+            ln = ln[:237] + "..."
+        bullets.append(f"- {ln}")
+    return "\n".join(bullets)
 
 
-def _apply_style(source_text: str, style_samples: List[str], style_name: str) -> str:
-    if not source_text:
-        return ""
-    if not style_samples:
-        return source_text
-    prefix = f"[{style_name}] " if style_name else ""
-    sample_hint = " ".join(style_samples[:2])
-    draft = textwrap.shorten(source_text, width=400, placeholder="…")
-    return f"{prefix}{draft}\n\n# Style guidance:\n{sample_hint}"
+def _style_prefix(style_name: str, style_examples: List[str]) -> str:
+    name = (style_name or "").strip() or "default"
+    out = [f"[STYLE: {name}]"]
+    if style_examples:
+        ex = (style_examples[0] or "").strip()
+        if ex:
+            excerpt = ex[:300].replace("\n", " ").strip()
+            out.append(f"Reference tone excerpt: {excerpt}")
+    return "\n".join(out)
 
 
-def compose_draft(item: Mapping[str, str], style_samples: List[str], style_name: str) -> Dict[str, object]:
-    """Produce structured writing outputs from a source item.
+def write_draft(
+    raw: str,
+    style_name: str,
+    style_examples: List[str],
+    topic_or_keyword: str = "",
+    link: str = "",
+) -> DraftOutput:
+    title = _make_title(raw)
+    summary = _facts_summary(raw)
 
-    The implementation is provider-agnostic to avoid coupling to any particular
-    LLM backend. Prompts should always avoid fabricating numbers or facts; this
-    stub keeps transformations minimal to respect that guarantee while remaining
-    pluggable for real LLM calls in production.
-    """
-    source_text = _select_source_text(item)
-    fallback_title = item.get("title") if isinstance(item.get("title"), str) else None
+    header: List[str] = []
+    if topic_or_keyword.strip():
+        header.append(f"Topic: {topic_or_keyword.strip()}")
+    if link.strip():
+        header.append(f"Source: {link.strip()}")
 
-    title = generate_title(source_text, fallback=fallback_title)
-    summary_bullets = summarize_facts(source_text)
-    styled_draft = _apply_style(source_text, style_samples, style_name)
+    style_guide = _style_prefix(style_name, style_examples)
 
-    return {
-        "title": title,
-        "summary_bullets": summary_bullets,
-        "styled_draft": styled_draft,
-    }
+    raw_clean = (raw or "").strip()
+    if len(raw_clean) > 1200:
+        raw_clean = raw_clean[:1197] + "..."
+
+    draft_lines: List[str] = [style_guide]
+    if header:
+        draft_lines.append("\n".join(header))
+    if summary:
+        draft_lines.append("Summary:")
+        draft_lines.append(summary)
+    draft_lines.append("Draft:")
+    draft_lines.append(raw_clean)
+
+    return DraftOutput(title=title, summary_facts=summary, draft="\n".join(draft_lines).strip())
