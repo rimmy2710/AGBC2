@@ -12,7 +12,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 
 class SheetsClient:
-    """Wrapper around gspread with graceful degradation when creds are missing."""
+    """Wrapper around gspread with explicit credential path support."""
 
     def __init__(self, sheet_id: str | None = None, tab_name: str | None = None):
         self.sheet_id = sheet_id or os.environ.get("GOOGLE_SHEET_ID")
@@ -23,7 +23,22 @@ class SheetsClient:
             raise RuntimeError("gspread is not installed; cannot write to Google Sheets")
         if not self.sheet_id:
             raise RuntimeError("GOOGLE_SHEET_ID is not configured")
-        client = gspread.service_account()
+
+        # Prefer explicit credential file path (Cloud Run / local)
+        creds_file = (
+            os.environ.get("GSPREAD_SERVICE_ACCOUNT_FILE")
+            or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+            or ""
+        ).strip()
+
+        if creds_file:
+            if not os.path.exists(creds_file):
+                raise FileNotFoundError(f"Service account file not found: {creds_file}")
+            client = gspread.service_account(filename=creds_file)
+        else:
+            # Fallback to gspread default location (~/.config/gspread/service_account.json)
+            client = gspread.service_account()
+
         spreadsheet = client.open_by_key(self.sheet_id)
         return spreadsheet.worksheet(self.tab_name)
 
@@ -55,7 +70,7 @@ def _format_timestamp(timestamp: object | None) -> str:
 
 def _format_entry(item: Mapping[str, object]) -> List[object]:
     summary_field = item.get("summary_bullets")
-    summary = " \n".join(summary_field) if isinstance(summary_field, (list, tuple)) else summary_field or ""
+    summary = " \n".join(summary_field) if isinstance(summary_field, (list, tuple)) else (summary_field or "")
 
     return [
         _format_timestamp(item.get("timestamp")),
