@@ -1,3 +1,4 @@
+cat > src/news_agent/pipeline/filter.py << 'EOF'
 """Keyword/topic filtering utilities."""
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ def _resolve_keywords_path(explicit_path: str | None = None) -> str:
 def load_keywords(path: str | None = None) -> List[str]:
     """Load keywords/topics from a newline-delimited file.
 
-    Empty lines and comment lines beginning with ``#`` are ignored. Matching is
-    case-insensitive, so loaded keywords are normalized to lowercase.
+    Empty lines and comment lines beginning with '#' are ignored.
+    Keywords are normalized to lowercase for case-insensitive matching.
     """
     resolved_path = _resolve_keywords_path(path)
     if not resolved_path or not os.path.exists(resolved_path):
@@ -40,12 +41,12 @@ def load_keywords(path: str | None = None) -> List[str]:
 
 
 def match_keyword(text: str, keywords: Sequence[str]) -> str | None:
-    """Return the first matched keyword (case-insensitive) or ``None``."""
+    """Return the first matched keyword (case-insensitive) or None."""
     if not text:
         return None
     lowered_text = text.lower()
     for keyword in keywords:
-        if keyword.lower() in lowered_text:
+        if keyword in lowered_text:
             return keyword
     return None
 
@@ -55,18 +56,20 @@ def _text_from_item(item: Mapping[str, str]) -> str:
     text_parts: List[str] = []
     for key in ("text", "message", "content", "title"):
         value = item.get(key, "")
-        if isinstance(value, str):
+        if isinstance(value, str) and value:
             text_parts.append(value)
-    return " \n".join(text_parts)
+    return "\n".join(text_parts)
 
 
 def filter_items(
-    items: Iterable[Mapping[str, str]], keywords: Sequence[str]
+    items: Iterable[Mapping[str, str]],
+    keywords: Sequence[str],
 ) -> Tuple[List[MutableMapping[str, str]], MutableMapping[str, str]]:
-    """Filter items by keyword/topic and map item_ids to matched keywords.
+    """Filter items by keyword/topic and map item_ids to matched keyword.
 
-    Returns a tuple of (qualified_items, match_map) where ``match_map`` stores
-    the matched keyword keyed by ``item_id`` for each qualified item.
+    Returns:
+      qualified_items: list of (shallow-copied) items that matched
+      match_map: dict[item_id] = matched_keyword
     """
     qualified: List[MutableMapping[str, str]] = []
     match_map: MutableMapping[str, str] = {}
@@ -77,9 +80,17 @@ def filter_items(
     for item in items:
         text = _text_from_item(item)
         matched = match_keyword(text, keywords)
-        if matched:
-            qualified_item: MutableMapping[str, str] = dict(item)
-            qualified.append(qualified_item)
-            item_id = str(item.get("item_id", len(match_map)))
-            match_map[item_id] = matched
+        if not matched:
+            continue
+
+        clone: MutableMapping[str, str] = dict(item)
+        qualified.append(clone)
+
+        item_id = str(item.get("item_id", ""))
+        if not item_id:
+            # fallback stable key for debugging only
+            item_id = f"idx:{len(match_map)}"
+        match_map[item_id] = matched
+
     return qualified, match_map
+EOF
