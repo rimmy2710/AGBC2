@@ -23,7 +23,6 @@ def _must_env(name: str) -> str:
 
 
 def _parse_iso_datetime(value: str) -> dt.datetime:
-    # NewsItem.iso() returns timezone-aware ISO; handle common variants.
     v = (value or "").strip()
     if not v:
         return dt.datetime.utcnow()
@@ -42,7 +41,6 @@ def main() -> int:
     api_hash = _must_env("TELEGRAM_API_HASH")
     session_path = _must_env("TELEGRAM_SESSION_PATH")
 
-    # Sheets (gspread uses GOOGLE_APPLICATION_CREDENTIALS implicitly)
     _must_env("GOOGLE_SHEET_ID")
     _must_env("GOOGLE_APPLICATION_CREDENTIALS")
     sheet_tab = os.getenv("GOOGLE_SHEET_TAB", "Sheet1").strip() or "Sheet1"
@@ -53,7 +51,6 @@ def main() -> int:
     tg_state_dir = os.path.join(state_dir, "tg_state")
     dedup_path = os.path.join(state_dir, "dedup.json")
 
-    # Phase-1 config
     keywords_path = os.getenv("KEYWORDS_FILE", os.path.join(state_dir, "keywords.txt")).strip()
     style_name = os.getenv("STYLE_NAME", "telegram_casual").strip() or "telegram_casual"
     style_dir = resolve_style_dir(os.getenv("STYLE_LIBRARY_DIR"))
@@ -72,18 +69,15 @@ def main() -> int:
 
     items, channels_processed = asyncio.run(ing.fetch_new())
 
-    # Dedup first
     store = DedupStore(path=dedup_path, max_items=int(os.getenv("DEDUP_MAX_ITEMS", "50000")))
     is_new = store.filter_new([it.item_id for it in items])
     items = [it for it in items if is_new.get(it.item_id, False)]
 
-    # Load keywords and filter
     keywords = load_keywords(keywords_path)
     if not keywords:
-        # strict mode by default
         print(
             f"channels_processed={channels_processed} fetched={len(is_new)} new_items=0 appended=0 "
-            f"keywords=0 style={style_name} (no keywords configured; strict drop)",
+            f"keywords=0 style={style_name}",
             flush=True,
         )
         return 0
@@ -96,10 +90,8 @@ def main() -> int:
     qualified_ids = {q.get("item_id") for q in qualified}
     items = [it for it in items if it.item_id in qualified_ids]
 
-    # Load style examples once
     style_examples = load_style_examples(style_dir, style_name, max_examples=style_max_examples)
 
-    # Build sheet entries expected by news_agent.pipeline.sheets.append_items
     sheet_items = []
     for it in items:
         matched_kw = match_map.get(it.item_id, "")
@@ -111,7 +103,6 @@ def main() -> int:
             link=it.link,
         )
 
-        # summary bullets as list (remove leading "- " if present)
         bullets = []
         for ln in (out.summary_facts or "").splitlines():
             ln = ln.strip()
