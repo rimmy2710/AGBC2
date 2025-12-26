@@ -5,3 +5,6 @@ storage/
 .env.*
 __pycache__/
 *.pyc
+
+# local-only env (do not commit)
+scripts/local_env.sh

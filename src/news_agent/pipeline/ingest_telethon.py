@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from datetime import timezone
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 from telethon import TelegramClient
 from telethon.tl.types import Message
@@ -59,8 +59,15 @@ class TelegramIngestor:
     def read_channels(self) -> List[str]:
         return _read_lines(self.cfg.channels_file)
 
-    async def fetch_new(self) -> Tuple[List[NewsItem], int]:
-        channels = self.read_channels()
+    async def fetch_new(self, channels_override: Optional[List[str]] = None) -> Tuple[List[NewsItem], int]:
+        """
+        Fetch new Telegram messages as NewsItem.
+
+        channels_override:
+          - If provided (non-empty list), use it instead of reading channels from cfg.channels_file.
+          - This supports admin-config-driven channel lists without needing to write files.
+        """
+        channels = channels_override if channels_override else self.read_channels()
         if not channels:
             return [], 0
 
