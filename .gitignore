@@ -8,3 +8,6 @@ __pycache__/
 
 # local-only env (do not commit)
 scripts/local_env.sh
+
+# local-only env (do not commit)
+scripts/local_env.sh
