@@ -38,7 +38,6 @@ def _safe_str(v: object) -> str:
 
 
 def _norm_header(h: str) -> str:
-    # normalize: lowercase, strip, spaces->_
     return _safe_str(h).lower().replace(" ", "_")
 
 
@@ -47,23 +46,6 @@ def _open_ws(sh, title: str):
         return sh.worksheet(title)
     except Exception:
         return sh.add_worksheet(title=title, rows=1000, cols=30)
-
-
-def _read_table(ws) -> Tuple[List[str], List[List[str]]]:
-    values = ws.get_all_values()
-    if not values:
-        return [], []
-    header = [h.strip() for h in values[0]]
-    rows = values[1:]
-    width = len(header)
-    norm_rows = []
-    for r in rows:
-        if len(r) < width:
-            r = r + [""] * (width - len(r))
-        elif len(r) > width:
-            r = r[:width]
-        norm_rows.append(r)
-    return header, norm_rows
 
 
 def _col_index(header: List[str]) -> Dict[str, int]:
@@ -84,12 +66,67 @@ def _pick_idx(idx: Dict[str, int], *candidates: str) -> int:
 
 
 def _fallback_key(time_iso: str, source: str, title: str, link: str) -> str:
-    # Prefer stable link if available
     if link:
         return f"link:{link}"
     raw = f"{time_iso}|{source}|{title}"
     h = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"hash:{h}"
+
+
+def _find_header_row(ws, scan_rows: int = 25) -> Tuple[int, List[str]]:
+    """
+    Find the most likely header row within first N rows.
+    Returns (header_row_index_1based, header_values)
+    """
+    candidates: List[Tuple[int, int, List[str]]] = []
+    keys = ["time", "source", "title", "draft", "link", "status", "topic", "keyword"]
+    for r in range(1, scan_rows + 1):
+        row = ws.row_values(r)
+        norm = [(c or "").strip().lower() for c in row]
+        non_empty = sum(1 for x in norm if x)
+        if non_empty < 3:
+            continue
+        score = 0
+        for k in keys:
+            if any(k in x for x in norm):
+                score += 1
+        if score >= 2:
+            candidates.append((score, r, row))
+
+    if not candidates:
+        # fallback to row 1
+        return 1, ws.row_values(1)
+
+    candidates.sort(reverse=True)
+    score, r, row = candidates[0]
+    return r, row
+
+
+def _read_table_with_header_detect(ws, scan_rows: int = 25, max_rows: int | None = None) -> Tuple[List[str], List[List[str]]]:
+    header_row, header = _find_header_row(ws, scan_rows=scan_rows)
+    if not header:
+        return [], []
+
+    # fetch all values once (gspread fastest this way)
+    values = ws.get_all_values()
+    if not values:
+        return [], []
+
+    # rows start after header_row
+    rows = values[header_row:]
+    if max_rows is not None and len(rows) > max_rows:
+        rows = rows[-max_rows:]
+
+    width = len(header)
+    norm_rows: List[List[str]] = []
+    for r in rows:
+        if len(r) < width:
+            r = r + [""] * (width - len(r))
+        elif len(r) > width:
+            r = r[:width]
+        norm_rows.append(r)
+
+    return header, norm_rows
 
 
 @dataclass
@@ -102,6 +139,7 @@ class LearningConfig:
     max_rows_scan: int = 2000
     state_dir: str = "storage"
     dedup_file: str = "learning_dedup.json"
+    header_scan_rows: int = 25
 
 
 @dataclass
@@ -128,32 +166,35 @@ def generate_suggestions(cfg: LearningConfig) -> Tuple[int, int, int]:
     sh = gc.open_by_key(cfg.sheet_id)
 
     src = _open_ws(sh, cfg.source_tab)
-    header, rows = _read_table(src)
+    header, rows = _read_table_with_header_detect(
+        src,
+        scan_rows=cfg.header_scan_rows,
+        max_rows=cfg.max_rows_scan,
+    )
     if not header:
         return 0, 0, 0
 
     idx = _col_index(header)
 
-    # Try common header variants
+    # common column variants
     i_time = _pick_idx(idx, "Time", "time")
     i_source = _pick_idx(idx, "Source", "source")
-    i_topic = _pick_idx(idx, "Topic/Keyword", "Topic", "Keyword", "topic/keyword")
+    i_topic = _pick_idx(idx, "Topic/Keyword", "Topic", "Keyword", "topic/keyword", "topic_keyword")
     i_title = _pick_idx(idx, "Title", "title")
-    i_draft = _pick_idx(idx, "Draft (styled)", "Draft", "styled_draft", "draft_styled")
+    i_draft = _pick_idx(idx, "Draft (styled)", "Draft", "draft", "styled_draft", "draft_styled")
     i_link = _pick_idx(idx, "Link", "link")
     i_status = _pick_idx(idx, "Status", "status")
     i_style = _pick_idx(idx, "style_name", "Style", "style")
 
-    # item_id may not exist → we will fallback
-    i_item = _pick_idx(idx, "item_id", "Item ID", "item id", "itemId")
+    # item_id may not exist
+    i_item = _pick_idx(idx, "item_id", "Item ID", "item id", "itemId", "ItemID")
 
-    scan_rows = rows[-cfg.max_rows_scan :] if len(rows) > cfg.max_rows_scan else rows
-    scanned = len(scan_rows)
+    scanned = len(rows)
 
     eligible: List[LearningSuggestion] = []
     status_target = (cfg.status_filter or "").strip().upper()
 
-    for r in scan_rows:
+    for r in rows:
         time_iso = _safe_str(r[i_time]) if i_time >= 0 else ""
         source = _safe_str(r[i_source]) if i_source >= 0 else ""
         topic = _safe_str(r[i_topic]) if i_topic >= 0 else ""
@@ -163,8 +204,10 @@ def generate_suggestions(cfg: LearningConfig) -> Tuple[int, int, int]:
         draft = _safe_str(r[i_draft]) if i_draft >= 0 else ""
         style_name = _safe_str(r[i_style]) if i_style >= 0 else ""
 
-        if status_target and status.strip().upper() != status_target:
-            continue
+        if status_target:
+            if status.strip().upper() != status_target:
+                continue
+
         if len(draft) < cfg.min_draft_chars:
             continue
 
@@ -178,7 +221,7 @@ def generate_suggestions(cfg: LearningConfig) -> Tuple[int, int, int]:
                 key=key,
                 time_iso=time_iso,
                 topic_or_keyword=topic,
-                style_name=style_name,  # keep if exists, else blank
+                style_name=style_name,
                 title=title,
                 draft=draft,
                 link=link,
