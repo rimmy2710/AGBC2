@@ -9,6 +9,13 @@ export PYTHONPATH="${PYTHONPATH:-/workspaces/AGBC2/src}"
 mkdir -p /home/codespace/.agbc2/secrets
 mkdir -p /home/codespace/.agbc2/logs
 mkdir -p /home/codespace/.config/gspread
+# Restore secrets from Codespaces env (base64) if provided
+if [[ -f scripts/install_secrets_from_env.sh ]]; then
+  if [[ -n "${GSPREAD_SA_JSON_B64:-}" || -n "${TELEGRAM_SESSION_B64:-}" ]]; then
+    bash scripts/install_secrets_from_env.sh
+  fi
+fi
+
 
 # 2) Optional local env (NOT committed)
 # You create this once locally: scripts/local_env.sh (ignored by git)
