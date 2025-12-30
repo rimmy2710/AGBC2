@@ -1,9 +1,9 @@
 name: AGBC2 Cron
 
-"on":
+on:
   workflow_dispatch:
   schedule:
-    - cron: "*/60 * * * *"  # every 60 minutes
+    - cron: "0 * * * *"  # every hour
 
 concurrency:
   group: agbc2-cron
@@ -16,18 +16,26 @@ jobs:
     env:
       AGBC2_HOME: /home/runner/.agbc2
       AGBC2_LOG_DIR: /home/runner/.agbc2/logs
+      AGBC2_SECRETS_DIR: /home/runner/.agbc2/secrets
 
+      # Telegram (StringSession - recommended)
       TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
       TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
       TELEGRAM_STRING_SESSION: ${{ secrets.TELEGRAM_STRING_SESSION }}
 
+      # Google Sheets
       GSPREAD_SA_JSON_B64: ${{ secrets.GSPREAD_SA_JSON_B64 }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
+      GOOGLE_APPLICATION_CREDENTIALS: /home/runner/.agbc2/secrets/gspread_service_account.json
 
+      # OpenAI (recommend start with 0 to avoid 429)
       OPENAI_ENABLED: ${{ secrets.OPENAI_ENABLED }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+
+      # Optional toggles
+      SELF_LEARNING_ENABLED: "0"
 
     steps:
       - name: Checkout
@@ -43,6 +51,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install secrets (from env to files)
+        run: |
+          set -e
+          mkdir -p "$AGBC2_LOG_DIR" "$AGBC2_SECRETS_DIR"
+          bash scripts/install_secrets_from_env.sh
+          ls -la "$AGBC2_SECRETS_DIR"
+          test -s "$GOOGLE_APPLICATION_CREDENTIALS"
+
       - name: Sanity env (no secrets)
         run: |
           echo "HOME=$HOME"
@@ -50,18 +66,18 @@ jobs:
           echo "AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
           python - <<'PY'
           import os
-          keys=["TELEGRAM_API_ID","TELEGRAM_API_HASH","TELEGRAM_STRING_SESSION",
-                "GSPREAD_SA_JSON_B64","GOOGLE_SHEET_ID","ADMIN_CONFIG_SHEET_ID",
-                "OPENAI_ENABLED","OPENAI_API_KEY","OPENAI_MODEL"]
+          keys=[
+            "TELEGRAM_API_ID","TELEGRAM_API_HASH","TELEGRAM_STRING_SESSION",
+            "GOOGLE_SHEET_ID","ADMIN_CONFIG_SHEET_ID","GOOGLE_APPLICATION_CREDENTIALS",
+            "OPENAI_ENABLED","OPENAI_MODEL"
+          ]
           for k in keys:
               print(f"{k}={'OK' if os.getenv(k) else 'MISSING'}")
           PY
 
-      - name: Run AGBC2 (ensure logs)
+      - name: Run AGBC2
         run: |
           set -e
-          mkdir -p "$AGBC2_LOG_DIR"
-          echo "[CI] created AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
           ./scripts/run_all.sh
         shell: bash
 
@@ -70,7 +86,7 @@ jobs:
         run: |
           echo "[CI] Dumping logs (if any): $AGBC2_LOG_DIR"
           ls -la "$AGBC2_LOG_DIR" || true
-          tail -n 300 "$AGBC2_LOG_DIR"/*.log 2>/dev/null || true
+          tail -n 400 "$AGBC2_LOG_DIR"/*.log 2>/dev/null || true
 
       - name: Upload logs (always)
         if: always()
