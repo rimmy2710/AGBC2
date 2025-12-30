@@ -1,7 +1,6 @@
-cat > .github/workflows/agbc2-cron.yml <<'YML'
 name: AGBC2 Cron
 
-on:
+"on":
   workflow_dispatch:
   schedule:
     - cron: "*/60 * * * *"  # every 60 minutes
@@ -15,7 +14,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      # Base dir on GitHub runner
       AGBC2_HOME: /home/runner/.agbc2
       AGBC2_LOG_DIR: /home/runner/.agbc2/logs
 
@@ -48,7 +46,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Optional: quick sanity without printing secrets
       - name: Sanity env (no secrets)
         run: |
           echo "HOME=$HOME"
@@ -73,4 +70,3 @@ jobs:
         with:
           name: agbc2-logs
           path: /home/runner/.agbc2/logs
-YML
