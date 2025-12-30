@@ -1,0 +1,51 @@
+name: AGBC2 Cron
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/60 * * * *"  # every 60 minutes
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Telegram
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_STRING_SESSION: ${{ secrets.TELEGRAM_STRING_SESSION }}
+      # Sheets
+      GSPREAD_SA_JSON_B64: ${{ secrets.GSPREAD_SA_JSON_B64 }}
+      GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+      ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
+      # OpenAI
+      OPENAI_ENABLED: ${{ secrets.OPENAI_ENABLED }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+
+      # Make runner use a predictable home path
+      AGBC2_LOG_DIR: /home/runner/.agbc2/logs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run AGBC2
+        run: |
+          ./scripts/run_all.sh
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agbc2-logs
+          path: /home/runner/.agbc2/logs

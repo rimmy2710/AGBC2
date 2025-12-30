@@ -6,6 +6,7 @@ from datetime import timezone
 from typing import List, Tuple, Optional
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.types import Message
 
 from .normalize import NewsItem
@@ -71,12 +72,22 @@ class TelegramIngestor:
         if not channels:
             return [], 0
 
-        client = TelegramClient(self.cfg.session_path, self.cfg.api_id, self.cfg.api_hash)
+        session_str = os.getenv("TELEGRAM_STRING_SESSION", "").strip()
+        if session_str:
+            client = TelegramClient(StringSession(session_str), self.cfg.api_id, self.cfg.api_hash)
+        else:
+            client = TelegramClient(self.cfg.session_path, self.cfg.api_id, self.cfg.api_hash)
+
 
         items: List[NewsItem] = []
         channels_processed = 0
 
         async with client:
+            if not await client.is_user_authorized():
+                raise RuntimeError(
+                    "Telegram not authorized. Set TELEGRAM_STRING_SESSION in Codespaces secrets, "
+                    "or run scripts/telegram_login.py once (not recommended for CI)."
+                )
             for ch in channels:
                 channels_processed += 1
                 last_id = load_last_id(self.cfg.tg_state_dir, ch)
