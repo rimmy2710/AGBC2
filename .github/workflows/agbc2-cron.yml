@@ -1,3 +1,4 @@
+cat > .github/workflows/agbc2-cron.yml <<'YML'
 name: AGBC2 Cron
 
 on:
@@ -5,26 +6,34 @@ on:
   schedule:
     - cron: "*/60 * * * *"  # every 60 minutes
 
+concurrency:
+  group: agbc2-cron
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
+      # Base dir on GitHub runner
+      AGBC2_HOME: /home/runner/.agbc2
+      AGBC2_LOG_DIR: /home/runner/.agbc2/logs
+
       # Telegram
       TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
       TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
       TELEGRAM_STRING_SESSION: ${{ secrets.TELEGRAM_STRING_SESSION }}
+
       # Sheets
       GSPREAD_SA_JSON_B64: ${{ secrets.GSPREAD_SA_JSON_B64 }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
+
       # OpenAI
       OPENAI_ENABLED: ${{ secrets.OPENAI_ENABLED }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
 
-      # Make runner use a predictable home path
-      AGBC2_LOG_DIR: /home/runner/.agbc2/logs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,6 +48,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      # Optional: quick sanity without printing secrets
+      - name: Sanity env (no secrets)
+        run: |
+          echo "HOME=$HOME"
+          echo "AGBC2_HOME=$AGBC2_HOME"
+          echo "AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
+          python - <<'PY'
+          import os
+          keys=["TELEGRAM_API_ID","TELEGRAM_API_HASH","TELEGRAM_STRING_SESSION",
+                "GSPREAD_SA_JSON_B64","GOOGLE_SHEET_ID","ADMIN_CONFIG_SHEET_ID",
+                "OPENAI_ENABLED","OPENAI_API_KEY","OPENAI_MODEL"]
+          for k in keys:
+              print(f"{k}={'OK' if os.getenv(k) else 'MISSING'}")
+          PY
+
       - name: Run AGBC2
         run: |
           ./scripts/run_all.sh
@@ -49,3 +73,4 @@ jobs:
         with:
           name: agbc2-logs
           path: /home/runner/.agbc2/logs
+YML

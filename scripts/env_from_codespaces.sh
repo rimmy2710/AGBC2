@@ -1,19 +1,26 @@
-cat > scripts/env_from_codespaces.sh <<'EOF'
+cat > scripts/env_from_codespaces.sh <<'SH'
 #!/usr/bin/env bash
-# Load runtime env from Codespaces-injected secrets (if present) with sane defaults
+# Load runtime env with sane defaults for BOTH Codespaces and GitHub Actions
 set -euo pipefail
 
-export PYTHONPATH="${PYTHONPATH:-/workspaces/AGBC2/src}"
+# Base dir for runtime secrets/logs (portable)
+export AGBC2_HOME="${AGBC2_HOME:-$HOME/.agbc2}"
+export AGBC2_LOG_DIR="${AGBC2_LOG_DIR:-$AGBC2_HOME/logs}"
+
+mkdir -p "$AGBC2_HOME" "$AGBC2_LOG_DIR" "$AGBC2_HOME/secrets"
+
+export PYTHONPATH="${PYTHONPATH:-$(pwd)/src}"
 
 # Sheets
 : "${GOOGLE_SHEET_ID:=}"
 : "${ADMIN_CONFIG_SHEET_ID:=}"
-: "${GOOGLE_APPLICATION_CREDENTIALS:=/home/codespace/.agbc2/secrets/gspread_service_account.json}"
+: "${GOOGLE_APPLICATION_CREDENTIALS:=$AGBC2_HOME/secrets/gspread_service_account.json}"
 
 # Telegram
 : "${TELEGRAM_API_ID:=}"
 : "${TELEGRAM_API_HASH:=}"
-: "${TELEGRAM_SESSION_PATH:=/home/codespace/.agbc2/secrets/telegram.session}"
+: "${TELEGRAM_SESSION_PATH:=$AGBC2_HOME/secrets/telegram.session}"
+: "${TELEGRAM_STRING_SESSION:=}"
 
 # Pipeline toggles
 : "${ADMIN_CONFIG_ENABLED:=1}"
@@ -26,9 +33,9 @@ export PYTHONPATH="${PYTHONPATH:-/workspaces/AGBC2/src}"
 : "${OPENAI_MODEL:=}"
 
 export GOOGLE_SHEET_ID ADMIN_CONFIG_SHEET_ID GOOGLE_APPLICATION_CREDENTIALS
-export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_PATH
+export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_PATH TELEGRAM_STRING_SESSION
 export ADMIN_CONFIG_ENABLED LIMIT_PER_CHANNEL STYLE_MAX_EXAMPLES
 export OPENAI_ENABLED OPENAI_API_KEY OPENAI_MODEL
-EOF
+SH
 
 chmod +x scripts/env_from_codespaces.sh
