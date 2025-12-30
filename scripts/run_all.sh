@@ -1,15 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ============================================================
+# AGBC2 portable paths (Codespaces + GitHub Actions)
+# ============================================================
+HOME_DIR="${HOME:-/home/runner}"
+AGBC2_HOME="${AGBC2_HOME:-$HOME_DIR/.agbc2}"
+AGBC2_LOG_DIR="${AGBC2_LOG_DIR:-$AGBC2_HOME/logs}"
+AGBC2_SECRETS_DIR="$AGBC2_HOME/secrets"
+
+mkdir -p "$AGBC2_LOG_DIR" "$AGBC2_SECRETS_DIR"
+
+export AGBC2_HOME AGBC2_LOG_DIR AGBC2_SECRETS_DIR
+
+# Timestamp (FIX LỖI CHÍNH)
+TS="$(date +%Y%m%d_%H%M%S)"
+LOG="$AGBC2_LOG_DIR/run_all_${TS}.log"
+
+echo "[AGBC2] HOME=$HOME_DIR"
+echo "[AGBC2] AGBC2_HOME=$AGBC2_HOME"
+echo "[AGBC2] AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
+echo "[AGBC2] LOG=$LOG"
+
 # Always run from repo root
 cd "$(dirname "$0")/.."
 
-mkdir -p /home/codespace/.agbc2/logs
+# Tee toàn bộ output vào log
+exec > >(tee -a "$LOG") 2>&1
 
-ts="$(date +%Y%m%d_%H%M%S)"
-log="/home/codespace/.agbc2/logs/run_all_${ts}.log"
-
-# Load env (prefer local_env.sh if exists; else rely on Codespaces Secrets env)
+# ============================================================
+# Load env
+# ============================================================
 if [[ -f scripts/local_env.sh ]]; then
   # shellcheck disable=SC1091
   source scripts/local_env.sh
@@ -17,25 +38,35 @@ fi
 
 export PYTHONPATH="${PYTHONPATH:-/workspaces/AGBC2/src}"
 
-# Ensure deps
-pip -q install -r requirements.txt >/dev/null
+# ============================================================
+# Install deps (CI-safe)
+# ============================================================
+pip install -q -r requirements.txt
 
-# Bootstrap: restores gspread json from env, checks admin/sheet/openai/telegram auth
-echo "[AGBC2] run_all: bootstrap..." | tee -a "$log"
-bash ./scripts/bootstrap.sh 2>&1 | tee -a "$log"
+# ============================================================
+# Bootstrap
+# ============================================================
+echo "[AGBC2] run_all: bootstrap..."
+bash scripts/bootstrap.sh
 
-# Safety: verify telegram session without OTP prompt
-echo "[AGBC2] run_all: check telegram session..." | tee -a "$log"
-python scripts/check_telegram_session.py 2>&1 | tee -a "$log"
+# ============================================================
+# Telegram session sanity check (NO OTP)
+# ============================================================
+echo "[AGBC2] run_all: check telegram session..."
+python scripts/check_telegram_session.py
 
-# Run main pipeline once
-echo "[AGBC2] run_all: run_telethon_once..." | tee -a "$log"
-PYTHONFAULTHANDLER=1 python -u scripts/run_telethon_once.py 2>&1 | tee -a "$log"
+# ============================================================
+# Main pipeline
+# ============================================================
+echo "[AGBC2] run_all: run_telethon_once..."
+PYTHONFAULTHANDLER=1 python -u scripts/run_telethon_once.py
 
-# Optional: self-learning suggestions (won't fail the whole run)
+# ============================================================
+# Optional self-learning
+# ============================================================
 if [[ -f scripts/self_learning_once.py ]]; then
-  echo "[AGBC2] run_all: self_learning_once (optional)..." | tee -a "$log"
-  PYTHONPATH="$PYTHONPATH" python scripts/self_learning_once.py 2>&1 | tee -a "$log" || true
+  echo "[AGBC2] run_all: self_learning_once (optional)..."
+  python scripts/self_learning_once.py || true
 fi
 
-echo "[AGBC2] run_all: done. log=$log" | tee -a "$log"
+echo "[AGBC2] run_all: done. log=$LOG"
