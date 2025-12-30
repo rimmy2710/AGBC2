@@ -49,10 +49,10 @@ def _fallback_write_draft(
         bullets.append(f"- {second}")
     summary_facts = "\n".join(bullets)
 
-    # Very simple “styled” draft: keep content readable, add minimal context
+    # Very simple “styled” draft
     draft_lines: List[str] = []
+    draft_lines.append(f"[STYLE: {style_name}]")
     if topic_or_keyword:
-        draft_lines.append(f"[STYLE: {style_name}]")
         draft_lines.append(f"Topic: {topic_or_keyword}")
     if link:
         draft_lines.append(f"Source: {link}")
@@ -60,7 +60,7 @@ def _fallback_write_draft(
         draft_lines.append("Summary:")
         draft_lines.extend(summary_facts.splitlines())
     draft_lines.append("Draft:")
-    draft_lines.extend(lines if lines else [raw.strip()])
+    draft_lines.extend(lines if lines else ([raw.strip()] if raw else []))
 
     return Draft(title=title, summary_facts=summary_facts, draft="\n".join(draft_lines).strip())
 
@@ -98,7 +98,6 @@ def write_draft(
                 draft=(out.get("draft") or "").strip(),
             )
         except Exception as e:
-            # IMPORTANT: do not leak sensitive info, keep logs short
             err = str(e)
             if len(err) > 200:
                 err = err[:200] + "..."
