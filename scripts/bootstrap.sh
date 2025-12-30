@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Load env defaults for Codespaces
+if [[ -f scripts/env_from_codespaces.sh ]]; then
+  # shellcheck disable=SC1091
+  source scripts/env_from_codespaces.sh
+fi
+
 
 echo "[AGBC2] bootstrap starting..."
 
