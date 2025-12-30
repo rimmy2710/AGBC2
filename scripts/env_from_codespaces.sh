@@ -1,4 +1,3 @@
-cat > scripts/env_from_codespaces.sh <<'SH'
 #!/usr/bin/env bash
 # Load runtime env with sane defaults for BOTH Codespaces and GitHub Actions
 set -euo pipefail
@@ -36,6 +35,3 @@ export GOOGLE_SHEET_ID ADMIN_CONFIG_SHEET_ID GOOGLE_APPLICATION_CREDENTIALS
 export TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_SESSION_PATH TELEGRAM_STRING_SESSION
 export ADMIN_CONFIG_ENABLED LIMIT_PER_CHANNEL STYLE_MAX_EXAMPLES
 export OPENAI_ENABLED OPENAI_API_KEY OPENAI_MODEL
-SH
-
-chmod +x scripts/env_from_codespaces.sh
