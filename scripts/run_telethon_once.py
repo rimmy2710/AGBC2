@@ -3,214 +3,397 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import inspect
 import logging
 import os
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-# Ensure src/ is on PYTHONPATH
+# ---------------------------------------------------------------------
+# Ensure src/ is on PYTHONPATH (Codespaces + Actions)
+# ---------------------------------------------------------------------
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+from news_agent.pipeline.admin_config import load_admin_config
+from news_agent.pipeline.telethon_client import build_telegram_client
+from news_agent.pipeline import sheets as sheets_mod
+
 log = logging.getLogger("run_telethon_once")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-def _env(name: str, default: str | None = None) -> str | None:
-    return os.getenv(name, default)
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
+def _env(name: str, default: Optional[str] = None) -> Optional[str]:
+    v = os.getenv(name)
+    if v is None or v.strip() == "":
+        return default
+    return v
 
 
-def _must_env(name: str) -> str:
+def _must(name: str) -> str:
     v = os.getenv(name)
     if not v:
         raise RuntimeError(f"Missing env var: {name}")
     return v
 
 
-def _normalize_keyword_rules(keyword_rules: Any) -> Tuple[List[str], Dict[str, str], Dict[str, str]]:
+def _int(name: str, default: int) -> int:
+    v = _env(name)
+    if v is None:
+        return default
+    try:
+        return int(v)
+    except ValueError:
+        return default
+
+
+def _bool(name: str, default: bool = False) -> bool:
+    v = _env(name)
+    if v is None:
+        return default
+    return v.strip() in ("1", "true", "True", "yes", "YES", "on", "ON")
+
+
+def _safe_channel_slug(ch: str) -> str:
+    ch = ch.strip()
+    return ch[1:] if ch.startswith("@") else ch
+
+
+def _msg_link(channel: str, msg_id: int) -> str:
+    # For public channels, t.me/<channel>/<id> usually works
+    return f"https://t.me/{_safe_channel_slug(channel)}/{msg_id}"
+
+
+def _load_last_id(state_dir: Path, channel: str) -> int:
+    p = state_dir / f"{channel}.last_id"
+    if not p.exists():
+        return 0
+    try:
+        return int(p.read_text().strip() or "0")
+    except Exception:
+        return 0
+
+
+def _save_last_id(state_dir: Path, channel: str, last_id: int) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    p = state_dir / f"{channel}.last_id"
+    p.write_text(str(int(last_id)))
+
+
+def _normalize_keywords(xs: Iterable[str]) -> List[str]:
+    out: List[str] = []
+    for x in xs:
+        x = (x or "").strip().lower()
+        if x:
+            out.append(x)
+    return out
+
+
+def _match_any_keyword(text: str, keywords: List[str]) -> Optional[str]:
+    if not keywords:
+        return None
+    t = (text or "").lower()
+    for kw in keywords:
+        if kw and kw in t:
+            return kw
+    return None
+
+
+def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dict[str, str], Dict[str, List[str]]]:
     """
-    AdminConfig.keyword_rules can be list of dicts/tuples/objects depending on version.
-    We extract:
-      - keywords: [str]
-      - kw_to_topic: {kw: topic}
-      - kw_to_style: {kw: style}
+    admin_config.AdminConfig currently exposes:
+      - channels: List[str]
+      - keyword_rules: (list)  <-- contains keyword/topic/style mapping
+      - styles: Dict[str, List[str]]
+    We must NOT assume cfg_admin.keywords exists.
     """
-    keywords: List[str] = []
+    kw_list: List[str] = []
     kw_to_topic: Dict[str, str] = {}
     kw_to_style: Dict[str, str] = {}
 
-    if not keyword_rules:
-        return keywords, kw_to_topic, kw_to_style
-
-    for r in keyword_rules:
-        kw = None
-        topic = None
-        style = None
-
+    rules = getattr(cfg_admin, "keyword_rules", []) or []
+    for r in rules:
+        # rule can be dict-like or object-like
         if isinstance(r, dict):
-            kw = r.get("keyword") or r.get("kw") or r.get("term")
-            topic = r.get("topic")
-            style = r.get("style")
-        elif isinstance(r, (list, tuple)):
-            # heuristic: (keyword, topic, style) or (keyword, topic) etc.
-            if len(r) >= 1:
-                kw = r[0]
-            if len(r) >= 2:
-                topic = r[1]
-            if len(r) >= 3:
-                style = r[2]
+            kw = (r.get("keyword") or r.get("kw") or r.get("term") or "").strip()
+            topic = (r.get("topic") or r.get("category") or "").strip()
+            style = (r.get("style") or r.get("style_name") or "").strip()
         else:
-            # object-like
-            kw = getattr(r, "keyword", None) or getattr(r, "kw", None) or getattr(r, "term", None)
-            topic = getattr(r, "topic", None)
-            style = getattr(r, "style", None)
+            kw = (getattr(r, "keyword", None) or getattr(r, "kw", None) or getattr(r, "term", None) or "").strip()
+            topic = (getattr(r, "topic", None) or getattr(r, "category", None) or "").strip()
+            style = (getattr(r, "style", None) or getattr(r, "style_name", None) or "").strip()
 
         if not kw:
             continue
-
-        kw_s = str(kw).strip().lower()
-        if not kw_s:
-            continue
-
-        keywords.append(kw_s)
+        kw_l = kw.lower()
+        kw_list.append(kw_l)
         if topic:
-            kw_to_topic[kw_s] = str(topic).strip()
+            kw_to_topic[kw_l] = topic
         if style:
-            kw_to_style[kw_s] = str(style).strip()
+            kw_to_style[kw_l] = style
 
-    # dedup keep order
-    seen = set()
-    deduped: List[str] = []
-    for k in keywords:
-        if k not in seen:
-            seen.add(k)
-            deduped.append(k)
+    styles = getattr(cfg_admin, "styles", {}) or {}
+    # Ensure style examples are list[str]
+    styles_clean: Dict[str, List[str]] = {}
+    for k, v in styles.items():
+        if isinstance(v, list):
+            styles_clean[str(k)] = [str(x) for x in v if str(x).strip()]
+        else:
+            styles_clean[str(k)] = [str(v)]
+    return _normalize_keywords(kw_list), kw_to_topic, kw_to_style, styles_clean
 
-    return deduped, kw_to_topic, kw_to_style
+
+def _draft_to_mapping(d: Any, *, fallback_title: str, fallback_link: str, keyword: str, style_name: str) -> Mapping[str, object]:
+    """
+    sheets.append_items expects Iterable[Mapping[str, object]].
+    We'll produce a mapping with keys that sheets.py is known to read:
+      - title
+      - summary_bullets
+      - draft
+      - link
+      - keyword
+      - style
+      - raw
+    """
+    data: Dict[str, object] = {}
+
+    if dataclasses.is_dataclass(d):
+        dct = dataclasses.asdict(d)
+    elif isinstance(d, dict):
+        dct = d
+    else:
+        # best-effort
+        dct = {k: getattr(d, k) for k in dir(d) if not k.startswith("_")}
+
+    # Common fields we may get from Draft
+    title = dct.get("title") or dct.get("headline") or fallback_title
+    draft = dct.get("draft") or dct.get("text") or dct.get("content") or ""
+    summary = dct.get("summary_bullets") or dct.get("summary") or dct.get("summary_facts") or dct.get("bullets")
+
+    if isinstance(summary, str):
+        # split into bullets lightly
+        summary_bullets = [x.strip("-• \t") for x in summary.splitlines() if x.strip()]
+    elif isinstance(summary, list):
+        summary_bullets = [str(x).strip() for x in summary if str(x).strip()]
+    else:
+        summary_bullets = []
+
+    link = dct.get("link") or dct.get("source") or dct.get("url") or fallback_link
+    raw = dct.get("raw") or dct.get("input") or ""
+
+    data["title"] = str(title)
+    data["summary_bullets"] = summary_bullets
+    data["draft"] = str(draft)
+    data["link"] = str(link)
+    data["keyword"] = str(keyword)
+    data["style"] = str(style_name)
+    data["raw"] = str(raw)
+
+    return data
 
 
+def _build_sheets_client(sheet_id: str, tab_name: str):
+    SheetsClient = getattr(sheets_mod, "SheetsClient", None)
+    if SheetsClient is None:
+        raise RuntimeError("news_agent.pipeline.sheets.SheetsClient not found")
+
+    # Try common ctor shapes
+    try:
+        return SheetsClient(sheet_id=sheet_id, tab_name=tab_name)
+    except TypeError:
+        try:
+            return SheetsClient(sheet_id, tab_name)
+        except TypeError:
+            # last resort: sheet_id only, tab name set via attribute
+            c = SheetsClient(sheet_id)
+            if hasattr(c, "tab_name"):
+                setattr(c, "tab_name", tab_name)
+            return c
+
+
+def _append_items(items: List[Mapping[str, object]], sheet_id: str, tab_name: str) -> int:
+    append_items = getattr(sheets_mod, "append_items", None)
+    if append_items is None:
+        raise RuntimeError("news_agent.pipeline.sheets.append_items not found")
+
+    client = _build_sheets_client(sheet_id, tab_name)
+
+    # Signature known: append_items(items, client=None)
+    sig = inspect.signature(append_items)
+    if "client" in sig.parameters:
+        append_items(items, client=client)
+    else:
+        append_items(items)
+
+    # append_items returns None; we return count for logs
+    return len(items)
+
+
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 async def run_once() -> int:
-    # ---- ENV ----
-    google_sheet_id = _must_env("GOOGLE_SHEET_ID")
+    google_sheet_id = _must("GOOGLE_SHEET_ID")
     google_sheet_tab = _env("GOOGLE_SHEET_TAB", "AGBC2 – News Draft") or "AGBC2 – News Draft"
 
-    admin_enabled = (_env("ADMIN_CONFIG_ENABLED", "1") == "1")
-    admin_sheet_id = _env("ADMIN_CONFIG_SHEET_ID")
+    telegram_api_id = int(_must("TELEGRAM_API_ID"))
+    telegram_api_hash = _must("TELEGRAM_API_HASH")
+    session_path = _env("TELEGRAM_SESSION_PATH", str(Path.home() / ".agbc2" / "secrets" / "telegram.session"))
+    # build_telegram_client reads TELEGRAM_STRING_SESSION itself
 
-    api_id = int(_must_env("TELEGRAM_API_ID"))
-    api_hash = _must_env("TELEGRAM_API_HASH")
-    session_path = _env("TELEGRAM_SESSION_PATH", os.path.expanduser("~/.agbc2/secrets/telegram.session")) or ""
+    limit_per_channel = _int("LIMIT_PER_CHANNEL", 20)
+    openai_enabled = _bool("OPENAI_ENABLED", False)
+    max_ai_items = _int("MAX_AI_ITEMS", 1)
 
-    limit_per_channel = int(_env("LIMIT_PER_CHANNEL", "20") or "20")
-    openai_enabled = (_env("OPENAI_ENABLED", "0") == "1")
+    tg_state_dir = Path(_env("TG_STATE_DIR", str(Path.home() / ".agbc2" / "tg_state")))
 
-    # ---- LOAD ADMIN CONFIG ----
+    # ---------- Load admin config (preferred) ----------
     channels: List[str] = []
     keywords: List[str] = []
     kw_to_topic: Dict[str, str] = {}
     kw_to_style: Dict[str, str] = {}
-    styles: Dict[str, Any] = {}
+    styles: Dict[str, List[str]] = {}
     admin = False
 
-    if admin_enabled:
-        if not admin_sheet_id:
-            raise RuntimeError("ADMIN_CONFIG_ENABLED=1 but ADMIN_CONFIG_SHEET_ID missing")
-
-        from news_agent.pipeline.admin_config import load_admin_config
-
-        cfg = load_admin_config(
-            admin_sheet_id,
-            channels_tab="channels",
-            keywords_tab="keywords",
-            styles_tab="styles",
-        )
-
-        channels = list(getattr(cfg, "channels", []) or [])
-        styles = dict(getattr(cfg, "styles", {}) or {})
-
-        keyword_rules = getattr(cfg, "keyword_rules", None)
-        keywords, kw_to_topic, kw_to_style = _normalize_keyword_rules(keyword_rules)
-
+    admin_sheet_id = _env("ADMIN_CONFIG_SHEET_ID")
+    if admin_sheet_id:
+        cfg_admin = load_admin_config(admin_sheet_id, channels_tab="channels", keywords_tab="keywords", styles_tab="styles")
+        channels = list(getattr(cfg_admin, "channels", []) or [])
+        keywords, kw_to_topic, kw_to_style, styles = _extract_admin_rules(cfg_admin)
         admin = True
     else:
-        # manual fallback if admin disabled
-        channels = [c.strip() for c in (_env("CHANNELS", "") or "").split(",") if c.strip()]
-        keywords = [k.strip().lower() for k in (_env("KEYWORDS", "") or "").split(",") if k.strip()]
+        # env fallback
+        channels = [x.strip() for x in (_env("CHANNELS", "") or "").split(",") if x.strip()]
+        keywords = _normalize_keywords([x for x in (_env("KEYWORDS", "") or "").split(",") if x.strip()])
+        styles = {"telegram_casual": ["Tóm tắt nhanh, dễ đọc."]}
 
-    channels = [c.strip() for c in channels if str(c).strip()]
-    keywords = [k.strip().lower() for k in keywords if str(k).strip()]
-
+    channels = [c.strip() for c in channels if c.strip()]
     if not channels:
         log.warning("No channels configured")
         return 0
 
-    # ---- TELEGRAM INGEST ----
-    from news_agent.pipeline.ingest_telethon import TelegramIngestConfig, TelegramIngestor
+    # ---------- Telethon ingest ----------
+    client = build_telegram_client(telegram_api_id, telegram_api_hash, session_path or "")
+    await client.connect()
+    try:
+        ok = await client.is_user_authorized()
+        if not ok:
+            raise RuntimeError("Telegram not authorized")
 
-    fields = {f.name for f in dataclasses.fields(TelegramIngestConfig)}
-    cfg_kwargs: Dict[str, Any] = {}
+        drafted_rows: List[Mapping[str, object]] = []
+        channels_processed = 0
+        fetched = 0
 
-    # required-ish across versions
-    if "api_id" in fields:
-        cfg_kwargs["api_id"] = api_id
-    if "api_hash" in fields:
-        cfg_kwargs["api_hash"] = api_hash
-    if "session_path" in fields:
-        cfg_kwargs["session_path"] = session_path
-    if "limit_per_channel" in fields:
-        cfg_kwargs["limit_per_channel"] = limit_per_channel
+        # Lazy import AI writer only if needed (avoid import mismatch breaking non-AI runs)
+        write_draft = None
+        if openai_enabled:
+            try:
+                from news_agent.pipeline.ai_writer import write_draft as _write_draft
+                write_draft = _write_draft
+            except Exception:
+                log.exception("AI import failed -> continue without AI")
+                write_draft = None
+                openai_enabled = False
 
-    # older versions require these two:
-    if "channels_file" in fields:
-        cfg_kwargs["channels_file"] = _env("CHANNELS_FILE", str(ROOT / "storage" / "channels.txt"))
-    if "tg_state_dir" in fields:
-        cfg_kwargs["tg_state_dir"] = _env("TG_STATE_DIR", os.path.expanduser("~/.agbc2/tg_state"))
+        for ch in channels:
+            channels_processed += 1
+            last_id = _load_last_id(tg_state_dir, ch)
+            max_seen_id = last_id
 
-    ing_cfg = TelegramIngestConfig(**cfg_kwargs)
-    ingestor = TelegramIngestor(ing_cfg)
+            # Pull newest first; we will filter + track max id
+            async for msg in client.iter_messages(ch, min_id=last_id, limit=limit_per_channel):
+                text = (msg.message or "").strip()
+                if not text:
+                    continue
 
-    # ingestor supports channels_override (you already patched it)
-    items, channels_processed = await ingestor.fetch_new(channels_override=channels)
-    fetched = len(items)
+                if msg.id and msg.id > max_seen_id:
+                    max_seen_id = msg.id
 
-    if fetched == 0:
+                matched_kw = _match_any_keyword(text, keywords)
+                if keywords and not matched_kw:
+                    continue
+
+                fetched += 1
+                kw = matched_kw or (keywords[0] if keywords else "general")
+                topic = kw_to_topic.get(kw, kw)
+                style_name = kw_to_style.get(kw, "telegram_casual")
+                style_examples = styles.get(style_name, styles.get("telegram_casual", ["Tóm tắt nhanh."]))
+                link = _msg_link(ch, msg.id)
+
+                # Default non-AI row
+                base_row: Dict[str, object] = {
+                    "title": text[:120],
+                    "summary_bullets": [text[:240]],
+                    "draft": text,
+                    "link": link,
+                    "keyword": kw,
+                    "style": style_name,
+                    "raw": text,
+                }
+
+                if openai_enabled and write_draft and len(drafted_rows) < max_ai_items:
+                    try:
+                        d = write_draft(
+                            raw=text,
+                            style_name=style_name,
+                            style_examples=style_examples,
+                            topic_or_keyword=topic,
+                            link=link,
+                        )
+                        row = _draft_to_mapping(
+                            d,
+                            fallback_title=str(base_row["title"]),
+                            fallback_link=link,
+                            keyword=kw,
+                            style_name=style_name,
+                        )
+                        drafted_rows.append(row)
+                        continue
+                    except Exception:
+                        log.exception("AI draft failed -> fallback to raw")
+                        drafted_rows.append(base_row)
+                        continue
+
+                drafted_rows.append(base_row)
+
+            # persist state per channel
+            if max_seen_id > last_id:
+                _save_last_id(tg_state_dir, ch, max_seen_id)
+
+        if not drafted_rows:
+            log.info(
+                "channels_processed=%d fetched=0 new_items=0 appended=0 keywords=%d admin=%s",
+                channels_processed,
+                len(keywords),
+                admin,
+            )
+            return 0
+
+        appended = _append_items(drafted_rows, sheet_id=google_sheet_id, tab_name=google_sheet_tab)
+
         log.info(
-            "channels_processed=%d fetched=0 new_items=0 appended=0 keywords=%d admin=%s",
+            "channels_processed=%d fetched=%d new_items=%d appended=%d keywords=%d admin=%s tab=%s ai=%s max_ai_items=%d",
             channels_processed,
+            fetched,
+            len(drafted_rows),
+            appended,
             len(keywords),
             admin,
+            google_sheet_tab,
+            openai_enabled,
+            max_ai_items,
         )
         return 0
 
-    # ---- AI REWRITE (safe adapter) ----
-    if openai_enabled:
-        # Prefer ai_writer facade (it can fallback)
-        try:
-            from news_agent.pipeline.ai_writer import rewrite_news_items as _rewrite
-            items = _rewrite(items, kw_to_topic=kw_to_topic, kw_to_style=kw_to_style, styles=styles)
-        except Exception:
-            log.exception("AI rewrite failed -> continue without rewrite")
-
-    # ---- OUTPUT TO SHEET ----
-    from news_agent.pipeline.sheets import SheetClient
-
-    sheet = SheetClient(sheet_id=google_sheet_id, tab_name=google_sheet_tab)
-    rows = [it.to_row() for it in items]
-    appended = sheet.append_rows(rows)
-
-    log.info(
-        "channels_processed=%d fetched=%d new_items=%d appended=%d keywords=%d admin=%s",
-        channels_processed,
-        fetched,
-        fetched,
-        appended,
-        len(keywords),
-        admin,
-    )
-    return 0
+    finally:
+        await client.disconnect()
 
 
 def main() -> int:
