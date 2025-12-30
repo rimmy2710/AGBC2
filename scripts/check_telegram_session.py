@@ -1,34 +1,24 @@
-from __future__ import annotations
-
 import asyncio
 import os
+from news_agent.pipeline.telethon_client import build_telegram_client
 
-from telethon import TelegramClient
-
-
-async def main() -> None:
+async def main():
     api_id = int(os.environ["TELEGRAM_API_ID"])
     api_hash = os.environ["TELEGRAM_API_HASH"]
-    session_path = os.environ["TELEGRAM_SESSION_PATH"]
+    session_path = os.environ.get("TELEGRAM_SESSION_PATH", "/home/codespace/.agbc2/secrets/telegram.session")
 
-    print("session_path=", session_path)
-
-    client = TelegramClient(session_path, api_id, api_hash)
-
-    # IMPORTANT: connect() only, no start() prompt.
-    await client.connect()
-    try:
-        authorized = await client.is_user_authorized()
-        print("is_user_authorized=", authorized)
-        if authorized:
+    client = build_telegram_client(api_id, api_hash, session_path)
+    async with client:
+        ok = await client.is_user_authorized()
+        print("session_path=", session_path)
+        print("using_string_session=", bool((os.getenv("TELEGRAM_STRING_SESSION") or "").strip()))
+        print("is_user_authorized=", ok)
+        if ok:
             me = await client.get_me()
-            print("me=", (me.username or me.first_name), "id=", me.id)
+            print("me=", getattr(me, "username", None), "id=", getattr(me, "id", None))
         else:
-            print("NOT authorized -> session exists but isn't logged in under current API_ID/HASH.")
-            print("Run: python scripts/telegram_login.py (with same env) to authorize once.")
-    finally:
-        await client.disconnect()
-
+            print("NOT authorized -> Run: python scripts/telegram_login.py (with same env) to authorize once.")
+    return 0
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
