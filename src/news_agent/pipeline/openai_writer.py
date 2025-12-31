@@ -149,7 +149,7 @@ def rewrite_with_openai(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    model_name = (model or _env("OPENAI_MODEL", "gpt-5-nano")).strip() or "gpt-5-nano"
+    model_name = (model or _env("OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-5-nano"
 
     messages = _build_messages(
         topic_or_keyword=(topic_or_keyword or "").strip(),
@@ -188,6 +188,6 @@ if __name__ == "__main__":
         raw_text="BTC ETF approved. Market reacts with higher volume.\nSecond line context.",
         style_name="telegram_casual",
         style_examples=["Tóm tắt kiểu trader..."],
-        model=_env("OPENAI_MODEL", "gpt-5-nano"),
+        model=_env("OPENAI_MODEL", "gpt-4o-mini"),
     )
     print(json.dumps(out, ensure_ascii=False, indent=2))

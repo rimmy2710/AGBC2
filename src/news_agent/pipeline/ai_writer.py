@@ -13,15 +13,23 @@ class Draft:
 
 
 def _env_bool(name: str, default: str = "0") -> bool:
-    v = os.getenv(name, default).strip().lower()
+    v = os.getenv(name, default)
+    v = (v or "").strip().lower()
     return v in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name, str(default))
+    try:
+        return int((v or "").strip() or str(default))
+    except Exception:
+        return default
 
 
 def _safe_lines(raw: str) -> List[str]:
     raw = (raw or "").strip()
     if not raw:
         return []
-    # Keep non-empty lines, trim
     return [ln.strip() for ln in raw.splitlines() if ln.strip()]
 
 
@@ -49,7 +57,6 @@ def _fallback_write_draft(
         bullets.append(f"- {second}")
     summary_facts = "\n".join(bullets)
 
-    # Very simple “styled” draft
     draft_lines: List[str] = []
     draft_lines.append(f"[STYLE: {style_name}]")
     if topic_or_keyword:
@@ -75,15 +82,22 @@ def write_draft(
 ) -> Draft:
     """
     Main entry used by runner.
-    - If OPENAI_ENABLED=1 and OPENAI_API_KEY is set, try OpenAI rewrite.
-    - Otherwise fallback writer.
+    Rules:
+    - Only call OpenAI if:
+        OPENAI_ENABLED=1 AND OPENAI_API_KEY set AND MAX_AI_ITEMS > 0
+      (MAX_AI_ITEMS=0 is a hard-disable guard for cron stability)
     - If OpenAI fails for any reason, fallback (pipeline must not break).
     """
-    if _env_bool("OPENAI_ENABLED", "0") and os.getenv("OPENAI_API_KEY", "").strip():
+    openai_enabled = _env_bool("OPENAI_ENABLED", "0")
+    api_key_present = bool(os.getenv("OPENAI_API_KEY", "").strip())
+    max_ai_items = _env_int("MAX_AI_ITEMS", 1)
+
+    if openai_enabled and api_key_present and max_ai_items > 0:
         try:
             from news_agent.pipeline.openai_writer import rewrite_with_openai
 
-            model = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+            # Keep default consistent with openai_writer
+            model = (os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
             out = rewrite_with_openai(
                 topic_or_keyword=topic_or_keyword,
                 source_link=link,
@@ -98,10 +112,12 @@ def write_draft(
                 draft=(out.get("draft") or "").strip(),
             )
         except Exception as e:
-            err = str(e)
-            if len(err) > 200:
-                err = err[:200] + "..."
-            print(f"[openai_writer] fallback due to error: {err}", flush=True)
+            # keep logs short, never crash pipeline
+            msg = f"{type(e).__name__}: {e}"
+            msg = msg.strip()
+            if len(msg) > 220:
+                msg = msg[:220] + "..."
+            print(f"[openai_writer] fallback due to error: {msg}", flush=True)
 
     return _fallback_write_draft(
         raw=raw,
