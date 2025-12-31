@@ -67,7 +67,6 @@ def _safe_channel_slug(ch: str) -> str:
 
 
 def _msg_link(channel: str, msg_id: int) -> str:
-    # For public channels, t.me/<channel>/<id> usually works
     return f"https://t.me/{_safe_channel_slug(channel)}/{msg_id}"
 
 
@@ -110,9 +109,8 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
     """
     admin_config.AdminConfig currently exposes:
       - channels: List[str]
-      - keyword_rules: list   <-- contains keyword/topic/style mapping
+      - keyword_rules: list   <-- keyword/topic/style mapping
       - styles: Dict[str, List[str]]
-    We must NOT assume cfg_admin.keywords exists.
     """
     kw_list: List[str] = []
     kw_to_topic: Dict[str, str] = {}
@@ -148,27 +146,33 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
     return _normalize_keywords(kw_list), kw_to_topic, kw_to_style, styles_clean
 
 
-def _get_signature_from_styles(styles: Dict[str, List[str]]) -> str:
+def _find_signature_from_examples(style_examples: List[str]) -> Optional[str]:
     """
-    Convention: if styles tab contains a row style_name="signature",
-    we treat its first example line as a signature appended to Draft (styled).
+    Nếu trong examples có nhắc tới signature “AGBC2 AI” thì ta append cứng.
+    Bạn có thể đổi rule nhận diện tại đây.
     """
-    sig_lines = styles.get("signature") or styles.get("SIGNATURE") or []
-    sig = (sig_lines[0] if sig_lines else "").strip()
-    return sig
+    blob = "\n".join(style_examples or [])
+    if "AGBC2 AI" in blob:
+        # signature chuẩn của bạn
+        return "— AGBC2 AI"
+    return None
 
 
-def _ensure_signature(draft: str, signature: str) -> str:
-    signature = (signature or "").strip()
-    if not signature:
-        return draft
-    d = (draft or "").strip()
-    if not d:
-        return d
-    # If signature already appears anywhere, don't duplicate
-    if signature in d:
-        return d
-    return f"{d}\n\n{signature}".strip()
+def _maybe_append_signature(draft_text: str, style_examples: List[str]) -> str:
+    sig = _find_signature_from_examples(style_examples)
+    if not sig:
+        return draft_text
+
+    t = (draft_text or "").rstrip()
+    if not t:
+        return sig
+
+    # đã có signature rồi thì thôi
+    if sig in t:
+        return t
+
+    # đảm bảo cách dòng đẹp
+    return f"{t}\n\n{sig}"
 
 
 def _draft_to_sheets_item(
@@ -181,10 +185,10 @@ def _draft_to_sheets_item(
     fallback_title: str,
     fallback_link: str,
     raw_text: str,
-    signature: str,
+    style_examples: List[str],
 ) -> Mapping[str, object]:
     """
-    IMPORTANT: must match src/news_agent/pipeline/sheets.py expectations:
+    MUST match src/news_agent/pipeline/sheets.py expectations:
       timestamp, source, matched_keyword, title, summary_bullets, styled_draft, link, status, item_id
     """
     if dataclasses.is_dataclass(d):
@@ -196,19 +200,16 @@ def _draft_to_sheets_item(
 
     title = (dct.get("title") or dct.get("headline") or fallback_title or "").strip()
 
-    # AI writer returns "summary_facts" as a BULLET STRING (lines starting with "- ")
     summary = dct.get("summary_bullets") or dct.get("summary") or dct.get("summary_facts") or dct.get("bullets")
     if isinstance(summary, str):
-        # KEEP bullets exactly (do NOT strip "-")
-        summary_bullets = [x.rstrip() for x in summary.splitlines() if x.strip()]
+        summary_bullets = [x.strip("-• \t") for x in summary.splitlines() if x.strip()]
     elif isinstance(summary, list):
-        summary_bullets = [str(x).rstrip() for x in summary if str(x).strip()]
+        summary_bullets = [str(x).strip() for x in summary if str(x).strip()]
     else:
         summary_bullets = []
 
-    # AI writer returns "draft" as string; sheets.py reads "styled_draft"
     styled_draft = (dct.get("draft") or dct.get("text") or dct.get("content") or "").strip()
-    styled_draft = _ensure_signature(styled_draft, signature)
+    styled_draft = _maybe_append_signature(styled_draft, style_examples)
 
     link = (dct.get("link") or dct.get("source") or dct.get("url") or fallback_link or "").strip()
 
@@ -222,7 +223,7 @@ def _draft_to_sheets_item(
         "link": link,
         "status": "DRAFT",
         "item_id": f"{_safe_channel_slug(channel)}:{msg_id}",
-        # extra debug fields
+        # extra debug field (không làm hại sheets.py)
         "raw": raw_text,
     }
     return item
@@ -251,13 +252,11 @@ def _append_items(items: List[Mapping[str, object]], sheet_id: str, tab_name: st
         raise RuntimeError("news_agent.pipeline.sheets.append_items not found")
 
     client = _build_sheets_client(sheet_id, tab_name)
-
     sig = inspect.signature(append_items)
     if "client" in sig.parameters:
         append_items(items, client=client)
     else:
         append_items(items)
-
     return len(items)
 
 
@@ -271,7 +270,6 @@ async def run_once() -> int:
     telegram_api_id = int(_must("TELEGRAM_API_ID"))
     telegram_api_hash = _must("TELEGRAM_API_HASH")
     session_path = _env("TELEGRAM_SESSION_PATH", str(Path.home() / ".agbc2" / "secrets" / "telegram.session"))
-    # build_telegram_client reads TELEGRAM_STRING_SESSION itself
 
     limit_per_channel = _int("LIMIT_PER_CHANNEL", 20)
     openai_enabled = _bool("OPENAI_ENABLED", False)
@@ -279,7 +277,7 @@ async def run_once() -> int:
 
     tg_state_dir = Path(_env("TG_STATE_DIR", str(Path.home() / ".agbc2" / "tg_state")))
 
-    # ---------- Load admin config (preferred) ----------
+    # ---------- Load admin config ----------
     channels: List[str] = []
     keywords: List[str] = []
     kw_to_topic: Dict[str, str] = {}
@@ -289,12 +287,7 @@ async def run_once() -> int:
 
     admin_sheet_id = _env("ADMIN_CONFIG_SHEET_ID")
     if admin_sheet_id:
-        cfg_admin = load_admin_config(
-            admin_sheet_id,
-            channels_tab="channels",
-            keywords_tab="keywords",
-            styles_tab="styles",
-        )
+        cfg_admin = load_admin_config(admin_sheet_id, channels_tab="channels", keywords_tab="keywords", styles_tab="styles")
         channels = list(getattr(cfg_admin, "channels", []) or [])
         keywords, kw_to_topic, kw_to_style, styles = _extract_admin_rules(cfg_admin)
         admin = True
@@ -302,8 +295,6 @@ async def run_once() -> int:
         channels = [x.strip() for x in (_env("CHANNELS", "") or "").split(",") if x.strip()]
         keywords = _normalize_keywords([x for x in (_env("KEYWORDS", "") or "").split(",") if x.strip()])
         styles = {"telegram_casual": ["Tóm tắt nhanh, dễ đọc."]}
-
-    signature = _get_signature_from_styles(styles)
 
     channels = [c.strip() for c in channels if c.strip()]
     if not channels:
@@ -326,7 +317,6 @@ async def run_once() -> int:
         if openai_enabled and max_ai_items > 0:
             try:
                 from news_agent.pipeline.ai_writer import write_draft as _write_draft
-
                 write_draft = _write_draft
             except Exception:
                 log.exception("AI import failed -> continue without AI")
@@ -353,20 +343,21 @@ async def run_once() -> int:
                 fetched += 1
                 kw = matched_kw or (keywords[0] if keywords else "general")
                 topic = kw_to_topic.get(kw, kw)
+
                 style_name = kw_to_style.get(kw, "telegram_casual")
                 style_examples = styles.get(style_name, styles.get("telegram_casual", ["Tóm tắt nhanh."]))
-                link = _msg_link(ch, msg.id)
 
+                link = _msg_link(ch, msg.id)
                 now_iso = datetime.now(timezone.utc).isoformat()
 
-                # Default non-AI item (aligned with sheets.py schema)
+                # Default non-AI item aligned with sheets.py schema
                 base_row: Dict[str, object] = {
                     "timestamp": now_iso,
                     "source": "telegram",
                     "matched_keyword": kw,
                     "title": text[:120],
                     "summary_bullets": [text[:240]],
-                    "styled_draft": text,  # fallback = raw
+                    "styled_draft": text,
                     "link": link,
                     "status": "DRAFT",
                     "item_id": f"{_safe_channel_slug(ch)}:{msg.id}",
@@ -392,7 +383,7 @@ async def run_once() -> int:
                             fallback_title=str(base_row["title"]),
                             fallback_link=link,
                             raw_text=text,
-                            signature=signature,
+                            style_examples=style_examples,
                         )
                         drafted_rows.append(ai_item)
                         continue
