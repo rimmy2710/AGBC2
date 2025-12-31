@@ -11,6 +11,10 @@ name: AGBC2 Cron
         description: "Max items to send to AI per run (safe default 1). Only affects workflow_dispatch runs."
         required: false
         default: "1"
+      sheet_tab:
+        description: "Google Sheet tab name to write output (e.g., CONTENTAI)"
+        required: false
+        default: "CONTENTAI"
   schedule:
     - cron: "0 * * * *"  # every hour
 
@@ -38,6 +42,7 @@ jobs:
       GSPREAD_SA_JSON_B64: ${{ secrets.GSPREAD_SA_JSON_B64 }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
+      GOOGLE_SHEET_TAB: ${{ github.event_name == 'workflow_dispatch' && inputs.sheet_tab || 'AGBC2 – News Draft' }}
 
       # OpenAI:
       # - Scheduled cron runs: ALWAYS OFF by default (stable pipeline, no quota noise)
