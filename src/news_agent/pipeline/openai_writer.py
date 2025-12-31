@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _env(name: str, default: str = "") -> str:
@@ -34,7 +34,6 @@ def _style_block(style_name: str, style_examples: List[str]) -> str:
         ex_lines.append(f"Example {i}:\n{ex}")
         if i >= 3:
             break
-
     examples_txt = "\n\n".join(ex_lines) if ex_lines else "(no examples provided)"
     return f"""STYLE NAME: {style_name}
 
@@ -110,7 +109,6 @@ def _ensure_fields(obj: Dict[str, Any]) -> Dict[str, str]:
 def _client():
     """
     FAIL-FAST client: by default no retries and short timeout.
-    This prevents 429 from blocking cron for long due to auto-retry.
     """
     from openai import OpenAI
 
@@ -124,9 +122,19 @@ def _client():
     )
 
 
-def _is_unsupported_param_error(e: Exception, param_name: str) -> bool:
+def _msg_has(e: Exception, needle: str) -> bool:
+    return needle in f"{e}"
+
+
+def _is_unsupported_param(e: Exception, param_name: str) -> bool:
     msg = f"{e}"
     return ("Unsupported parameter" in msg) and (f"'{param_name}'" in msg or f'"{param_name}"' in msg)
+
+
+def _is_unsupported_temperature_value(e: Exception) -> bool:
+    # matches your error: "Unsupported value: 'temperature' ... Only the default (1) value is supported."
+    msg = f"{e}"
+    return ("Unsupported value" in msg) and ("temperature" in msg)
 
 
 def rewrite_with_openai(
@@ -138,10 +146,6 @@ def rewrite_with_openai(
     style_examples: List[str],
     model: Optional[str] = None,
 ) -> Dict[str, str]:
-    """
-    Returns: {"title":..., "summary_facts":..., "draft":...}
-    Raises exceptions on failure so caller can fallback.
-    """
     api_key = _env("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY missing")
@@ -164,34 +168,49 @@ def rewrite_with_openai(
     base_kwargs: Dict[str, Any] = dict(
         model=model_name,
         messages=messages,
-        temperature=temperature,
         response_format={"type": "json_object"},
     )
 
-    # Prefer max_completion_tokens first (newer models), fallback to max_tokens if needed.
-    try_orders = [
+    # We try combinations:
+    # - token param: max_completion_tokens then max_tokens
+    # - temperature included vs omitted (some models only support default)
+    token_param_order: List[Tuple[str, int]] = [
         ("max_completion_tokens", max_out),
         ("max_tokens", max_out),
     ]
+    temp_modes: List[Tuple[str, Optional[float]]] = [
+        ("with_temp", temperature),
+        ("no_temp", None),
+    ]
 
     last_err: Optional[Exception] = None
-    for token_param, token_value in try_orders:
-        kwargs = dict(base_kwargs)
-        kwargs[token_param] = token_value
-        try:
-            resp = c.chat.completions.create(**kwargs)
-            text = resp.choices[0].message.content or ""
-            obj = _parse_json_strict(text)
-            out = _ensure_fields(obj)
-            if not out["title"] and not out["draft"]:
-                raise ValueError("Model returned empty output")
-            return out
-        except Exception as e:
-            last_err = e
-            # Only fallback to the other token param when it's clearly unsupported-parameter
-            if _is_unsupported_param_error(e, token_param):
-                continue
-            raise
+    for token_param, token_value in token_param_order:
+        for temp_mode, temp_value in temp_modes:
+            kwargs = dict(base_kwargs)
+            kwargs[token_param] = token_value
+            if temp_value is not None:
+                kwargs["temperature"] = temp_value
+
+            try:
+                resp = c.chat.completions.create(**kwargs)
+                text = resp.choices[0].message.content or ""
+                obj = _parse_json_strict(text)
+                out = _ensure_fields(obj)
+                if not out["title"] and not out["draft"]:
+                    raise ValueError("Model returned empty output")
+                return out
+            except Exception as e:
+                last_err = e
+
+                # If token param is unsupported, try the other token param.
+                if _is_unsupported_param(e, token_param):
+                    break  # break temp loop, go next token_param
+
+                # If temperature value unsupported, retry without temperature (same token param).
+                if temp_value is not None and _is_unsupported_temperature_value(e):
+                    continue
+
+                raise
 
     assert last_err is not None
     raise last_err
