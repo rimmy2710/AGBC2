@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -110,7 +111,7 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
     """
     admin_config.AdminConfig currently exposes:
       - channels: List[str]
-      - keyword_rules: (list)  <-- contains keyword/topic/style mapping
+      - keyword_rules: list   <-- contains keyword/topic/style mapping
       - styles: Dict[str, List[str]]
     We must NOT assume cfg_admin.keywords exists.
     """
@@ -120,7 +121,6 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
 
     rules = getattr(cfg_admin, "keyword_rules", []) or []
     for r in rules:
-        # rule can be dict-like or object-like
         if isinstance(r, dict):
             kw = (r.get("keyword") or r.get("kw") or r.get("term") or "").strip()
             topic = (r.get("topic") or r.get("category") or "").strip()
@@ -140,7 +140,6 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
             kw_to_style[kw_l] = style
 
     styles = getattr(cfg_admin, "styles", {}) or {}
-    # Ensure style examples are list[str]
     styles_clean: Dict[str, List[str]] = {}
     for k, v in styles.items():
         if isinstance(v, list):
@@ -150,53 +149,58 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
     return _normalize_keywords(kw_list), kw_to_topic, kw_to_style, styles_clean
 
 
-def _draft_to_mapping(d: Any, *, fallback_title: str, fallback_link: str, keyword: str, style_name: str) -> Mapping[str, object]:
+def _draft_to_sheets_item(
+    d: Any,
+    *,
+    timestamp: str,
+    channel: str,
+    msg_id: int,
+    keyword: str,
+    fallback_title: str,
+    fallback_link: str,
+    raw_text: str,
+) -> Mapping[str, object]:
     """
-    sheets.append_items expects Iterable[Mapping[str, object]].
-    We'll produce a mapping with keys that sheets.py is known to read:
-      - title
-      - summary_bullets
-      - draft
-      - link
-      - keyword
-      - style
-      - raw
+    IMPORTANT: must match src/news_agent/pipeline/sheets.py expectations:
+      timestamp, source, matched_keyword, title, summary_bullets, styled_draft, link, status, item_id
     """
-    data: Dict[str, object] = {}
-
     if dataclasses.is_dataclass(d):
         dct = dataclasses.asdict(d)
     elif isinstance(d, dict):
         dct = d
     else:
-        # best-effort
         dct = {k: getattr(d, k) for k in dir(d) if not k.startswith("_")}
 
-    # Common fields we may get from Draft
-    title = dct.get("title") or dct.get("headline") or fallback_title
-    draft = dct.get("draft") or dct.get("text") or dct.get("content") or ""
-    summary = dct.get("summary_bullets") or dct.get("summary") or dct.get("summary_facts") or dct.get("bullets")
+    title = (dct.get("title") or dct.get("headline") or fallback_title or "").strip()
 
+    # AI writer uses "summary_facts" (string with bullets)
+    summary = dct.get("summary_bullets") or dct.get("summary") or dct.get("summary_facts") or dct.get("bullets")
     if isinstance(summary, str):
-        # split into bullets lightly
         summary_bullets = [x.strip("-• \t") for x in summary.splitlines() if x.strip()]
     elif isinstance(summary, list):
         summary_bullets = [str(x).strip() for x in summary if str(x).strip()]
     else:
         summary_bullets = []
 
-    link = dct.get("link") or dct.get("source") or dct.get("url") or fallback_link
-    raw = dct.get("raw") or dct.get("input") or ""
+    # AI writer uses "draft" (string)
+    styled_draft = (dct.get("draft") or dct.get("text") or dct.get("content") or "").strip()
 
-    data["title"] = str(title)
-    data["summary_bullets"] = summary_bullets
-    data["draft"] = str(draft)
-    data["link"] = str(link)
-    data["keyword"] = str(keyword)
-    data["style"] = str(style_name)
-    data["raw"] = str(raw)
+    link = (dct.get("link") or dct.get("source") or dct.get("url") or fallback_link or "").strip()
 
-    return data
+    item: Dict[str, object] = {
+        "timestamp": timestamp,
+        "source": "telegram",
+        "matched_keyword": keyword,
+        "title": title,
+        "summary_bullets": summary_bullets,
+        "styled_draft": styled_draft,
+        "link": link,
+        "status": "DRAFT",
+        "item_id": f"{_safe_channel_slug(channel)}:{msg_id}",
+        # extra debug fields
+        "raw": raw_text,
+    }
+    return item
 
 
 def _build_sheets_client(sheet_id: str, tab_name: str):
@@ -204,14 +208,12 @@ def _build_sheets_client(sheet_id: str, tab_name: str):
     if SheetsClient is None:
         raise RuntimeError("news_agent.pipeline.sheets.SheetsClient not found")
 
-    # Try common ctor shapes
     try:
         return SheetsClient(sheet_id=sheet_id, tab_name=tab_name)
     except TypeError:
         try:
             return SheetsClient(sheet_id, tab_name)
         except TypeError:
-            # last resort: sheet_id only, tab name set via attribute
             c = SheetsClient(sheet_id)
             if hasattr(c, "tab_name"):
                 setattr(c, "tab_name", tab_name)
@@ -225,14 +227,12 @@ def _append_items(items: List[Mapping[str, object]], sheet_id: str, tab_name: st
 
     client = _build_sheets_client(sheet_id, tab_name)
 
-    # Signature known: append_items(items, client=None)
     sig = inspect.signature(append_items)
     if "client" in sig.parameters:
         append_items(items, client=client)
     else:
         append_items(items)
 
-    # append_items returns None; we return count for logs
     return len(items)
 
 
@@ -269,7 +269,6 @@ async def run_once() -> int:
         keywords, kw_to_topic, kw_to_style, styles = _extract_admin_rules(cfg_admin)
         admin = True
     else:
-        # env fallback
         channels = [x.strip() for x in (_env("CHANNELS", "") or "").split(",") if x.strip()]
         keywords = _normalize_keywords([x for x in (_env("KEYWORDS", "") or "").split(",") if x.strip()])
         styles = {"telegram_casual": ["Tóm tắt nhanh, dễ đọc."]}
@@ -279,7 +278,6 @@ async def run_once() -> int:
         log.warning("No channels configured")
         return 0
 
-    # ---------- Telethon ingest ----------
     client = build_telegram_client(telegram_api_id, telegram_api_hash, session_path or "")
     await client.connect()
     try:
@@ -292,9 +290,8 @@ async def run_once() -> int:
         fetched = 0
         ai_calls = 0
 
-        # Lazy import AI writer only if needed (avoid import mismatch breaking non-AI runs)
         write_draft = None
-        if openai_enabled:
+        if openai_enabled and max_ai_items > 0:
             try:
                 from news_agent.pipeline.ai_writer import write_draft as _write_draft
                 write_draft = _write_draft
@@ -308,7 +305,6 @@ async def run_once() -> int:
             last_id = _load_last_id(tg_state_dir, ch)
             max_seen_id = last_id
 
-            # Pull newest first; we will filter + track max id
             async for msg in client.iter_messages(ch, min_id=last_id, limit=limit_per_channel):
                 text = (msg.message or "").strip()
                 if not text:
@@ -328,19 +324,24 @@ async def run_once() -> int:
                 style_examples = styles.get(style_name, styles.get("telegram_casual", ["Tóm tắt nhanh."]))
                 link = _msg_link(ch, msg.id)
 
-                # Default non-AI row
+                now_iso = datetime.now(timezone.utc).isoformat()
+
+                # Default non-AI item (already aligned with sheets.py schema)
                 base_row: Dict[str, object] = {
+                    "timestamp": now_iso,
+                    "source": "telegram",
+                    "matched_keyword": kw,
                     "title": text[:120],
                     "summary_bullets": [text[:240]],
-                    "draft": text,
+                    "styled_draft": text,
                     "link": link,
-                    "keyword": kw,
-                    "style": style_name,
+                    "status": "DRAFT",
+                    "item_id": f"{_safe_channel_slug(ch)}:{msg.id}",
                     "raw": text,
                 }
 
                 if openai_enabled and write_draft and ai_calls < max_ai_items:
-                    ai_calls += 1  # count attempts to call AI
+                    ai_calls += 1
                     try:
                         d = write_draft(
                             raw=text,
@@ -349,19 +350,22 @@ async def run_once() -> int:
                             topic_or_keyword=topic,
                             link=link,
                         )
-                        row = _draft_to_mapping(
+                        ai_item = _draft_to_sheets_item(
                             d,
+                            timestamp=now_iso,
+                            channel=ch,
+                            msg_id=msg.id,
+                            keyword=kw,
                             fallback_title=str(base_row["title"]),
                             fallback_link=link,
-                            keyword=kw,
-                            style_name=style_name,
+                            raw_text=text,
                         )
-                        drafted_rows.append(row)
+                        drafted_rows.append(ai_item)
                         continue
                     except Exception as e:
                         log.exception("AI draft failed -> fallback to raw")
-                        msg = f"{e}"
-                        if "429" in msg or "RateLimit" in msg or "rate limit" in msg.lower():
+                        emsg = f"{e}"
+                        if "429" in emsg or "RateLimit" in emsg or "rate limit" in emsg.lower():
                             log.warning("Rate limit detected -> disabling AI for rest of run")
                             openai_enabled = False
                             max_ai_items = 0
@@ -370,7 +374,6 @@ async def run_once() -> int:
 
                 drafted_rows.append(base_row)
 
-            # persist state per channel
             if max_seen_id > last_id:
                 _save_last_id(tg_state_dir, ch, max_seen_id)
 
