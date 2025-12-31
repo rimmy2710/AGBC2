@@ -364,6 +364,7 @@ async def run_once() -> int:
                         if "429" in msg or "RateLimit" in msg or "rate limit" in msg.lower():
                             log.warning("Rate limit detected -> disabling AI for rest of run")
                             openai_enabled = False
+                            max_ai_items = 0
                         drafted_rows.append(base_row)
                         continue
 
