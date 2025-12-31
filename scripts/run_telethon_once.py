@@ -290,6 +290,7 @@ async def run_once() -> int:
         drafted_rows: List[Mapping[str, object]] = []
         channels_processed = 0
         fetched = 0
+        ai_calls = 0
 
         # Lazy import AI writer only if needed (avoid import mismatch breaking non-AI runs)
         write_draft = None
@@ -338,7 +339,8 @@ async def run_once() -> int:
                     "raw": text,
                 }
 
-                if openai_enabled and write_draft and len(drafted_rows) < max_ai_items:
+                if openai_enabled and write_draft and ai_calls < max_ai_items:
+                    ai_calls += 1  # count attempts to call AI
                     try:
                         d = write_draft(
                             raw=text,
