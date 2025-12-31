@@ -358,8 +358,12 @@ async def run_once() -> int:
                         )
                         drafted_rows.append(row)
                         continue
-                    except Exception:
+                    except Exception as e:
                         log.exception("AI draft failed -> fallback to raw")
+                        msg = f"{e}"
+                        if "429" in msg or "RateLimit" in msg or "rate limit" in msg.lower():
+                            log.warning("Rate limit detected -> disabling AI for rest of run")
+                            openai_enabled = False
                         drafted_rows.append(base_row)
                         continue
 
