@@ -14,3 +14,8 @@ scripts/local_env.sh
 
 # temp
 /d
+.github/workflows/agbc2-cron.yml.bak2
+
+# local backups
+*.bak
+*.bak*
