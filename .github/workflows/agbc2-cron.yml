@@ -55,6 +55,7 @@ jobs:
       # (Optional but recommended if your code supports them)
       OPENAI_TIMEOUT: "15"
       OPENAI_MAX_RETRIES: "0"
+      OPENAI_MAX_TOKENS: "250"
 
     steps:
       - name: Checkout
