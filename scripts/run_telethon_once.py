@@ -381,7 +381,7 @@ async def run_once() -> int:
         appended = _append_items(drafted_rows, sheet_id=google_sheet_id, tab_name=google_sheet_tab)
 
         log.info(
-            "channels_processed=%d fetched=%d new_items=%d appended=%d keywords=%d admin=%s tab=%s ai=%s max_ai_items=%d",
+            "channels_processed=%d fetched=%d new_items=%d appended=%d keywords=%d admin=%s tab=%s ai=%s ai_calls=%d max_ai_items=%d",
             channels_processed,
             fetched,
             len(drafted_rows),
@@ -390,6 +390,7 @@ async def run_once() -> int:
             admin,
             google_sheet_tab,
             openai_enabled,
+            ai_calls,
             max_ai_items,
         )
         return 0
