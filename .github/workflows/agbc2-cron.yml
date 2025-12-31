@@ -1,7 +1,16 @@
 name: AGBC2 Cron
 
-on:
+"on":
   workflow_dispatch:
+    inputs:
+      openai_enabled:
+        description: "Enable OpenAI (1 to enable, 0 to disable). Only affects workflow_dispatch runs."
+        required: false
+        default: "0"
+      max_ai_items:
+        description: "Max items to send to AI per run (safe default 1). Only affects workflow_dispatch runs."
+        required: false
+        default: "1"
   schedule:
     - cron: "0 * * * *"  # every hour
 
@@ -30,13 +39,22 @@ jobs:
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
 
-      # OpenAI (recommend start with 0 to avoid 429)
-      OPENAI_ENABLED: ${{ secrets.OPENAI_ENABLED }}
+      # OpenAI:
+      # - Scheduled cron runs: ALWAYS OFF by default (stable pipeline, no quota noise)
+      # - workflow_dispatch runs: controllable via inputs
+      OPENAI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_enabled || '0' }}
+      MAX_AI_ITEMS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_ai_items || '0' }}
+
+      # OpenAI credentials/model can stay as secrets; they won't be used when OPENAI_ENABLED=0
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
 
       # Optional toggles
       SELF_LEARNING_ENABLED: "0"
+
+      # (Optional but recommended if your code supports them)
+      OPENAI_TIMEOUT: "15"
+      OPENAI_MAX_RETRIES: "0"
 
     steps:
       - name: Checkout
@@ -52,17 +70,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Debug env (find /home/codespace)
-        run: |
-          set -e
-          echo "HOME=$HOME"
-          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
-          echo "AGBC2_HOME=$AGBC2_HOME"
-          echo "AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
-          echo "AGBC2_SECRETS_DIR=$AGBC2_SECRETS_DIR"
-          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
-          env | grep -n "/home/codespace" || true
-
       - name: Install secrets (from env to files)
         run: |
           set -e
@@ -74,14 +81,17 @@ jobs:
       - name: Sanity env (no secrets)
         run: |
           echo "HOME=$HOME"
+          echo "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
           echo "AGBC2_HOME=$AGBC2_HOME"
           echo "AGBC2_LOG_DIR=$AGBC2_LOG_DIR"
+          echo "AGBC2_SECRETS_DIR=$AGBC2_SECRETS_DIR"
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS"
           python - <<'PY'
           import os
           keys=[
             "TELEGRAM_API_ID","TELEGRAM_API_HASH","TELEGRAM_STRING_SESSION",
             "GOOGLE_SHEET_ID","ADMIN_CONFIG_SHEET_ID","GOOGLE_APPLICATION_CREDENTIALS",
-            "OPENAI_ENABLED","OPENAI_MODEL"
+            "OPENAI_ENABLED","OPENAI_MODEL","MAX_AI_ITEMS"
           ]
           for k in keys:
               print(f"{k}={'OK' if os.getenv(k) else 'MISSING'}")
