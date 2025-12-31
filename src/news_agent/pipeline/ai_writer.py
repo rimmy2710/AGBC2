@@ -41,10 +41,6 @@ def _fallback_write_draft(
     topic_or_keyword: str,
     link: str,
 ) -> Draft:
-    """
-    Cheap fallback writer (no OpenAI).
-    Keeps pipeline working even when OpenAI is disabled or unavailable.
-    """
     lines = _safe_lines(raw)
     first = lines[0] if lines else ""
     second = lines[1] if len(lines) > 1 else ""
@@ -72,6 +68,12 @@ def _fallback_write_draft(
     return Draft(title=title, summary_facts=summary_facts, draft="\n".join(draft_lines).strip())
 
 
+def _is_rate_limit_error(e: Exception) -> bool:
+    msg = f"{e}"
+    # works for OpenAI SDK RateLimitError plus generic messages
+    return ("RateLimit" in msg) or ("429" in msg) or ("rate limit" in msg.lower())
+
+
 def write_draft(
     *,
     raw: str,
@@ -81,12 +83,12 @@ def write_draft(
     link: str,
 ) -> Draft:
     """
-    Main entry used by runner.
     Rules:
     - Only call OpenAI if:
         OPENAI_ENABLED=1 AND OPENAI_API_KEY set AND MAX_AI_ITEMS > 0
-      (MAX_AI_ITEMS=0 is a hard-disable guard for cron stability)
-    - If OpenAI fails for any reason, fallback (pipeline must not break).
+    - If OpenAI fails:
+        - On 429 / rate limit: re-raise so runner can circuit-break (stop further AI calls)
+        - Otherwise: fallback (pipeline must not break)
     """
     openai_enabled = _env_bool("OPENAI_ENABLED", "0")
     api_key_present = bool(os.getenv("OPENAI_API_KEY", "").strip())
@@ -96,7 +98,6 @@ def write_draft(
         try:
             from news_agent.pipeline.openai_writer import rewrite_with_openai
 
-            # Keep default consistent with openai_writer
             model = (os.getenv("OPENAI_MODEL", "").strip() or "gpt-4o-mini")
             out = rewrite_with_openai(
                 topic_or_keyword=topic_or_keyword,
@@ -112,9 +113,11 @@ def write_draft(
                 draft=(out.get("draft") or "").strip(),
             )
         except Exception as e:
-            # keep logs short, never crash pipeline
-            msg = f"{type(e).__name__}: {e}"
-            msg = msg.strip()
+            # IMPORTANT: allow runner to circuit-break on 429
+            if _is_rate_limit_error(e):
+                raise
+
+            msg = f"{type(e).__name__}: {e}".strip()
             if len(msg) > 220:
                 msg = msg[:220] + "..."
             print(f"[openai_writer] fallback due to error: {msg}", flush=True)
