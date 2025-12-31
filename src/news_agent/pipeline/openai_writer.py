@@ -25,11 +25,6 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _truncate(s: str, n: int = 220) -> str:
-    s = str(s or "")
-    return s if len(s) <= n else s[:n] + "..."
-
-
 def _style_block(style_name: str, style_examples: List[str]) -> str:
     ex_lines: List[str] = []
     for i, ex in enumerate(style_examples or [], start=1):
@@ -37,7 +32,7 @@ def _style_block(style_name: str, style_examples: List[str]) -> str:
         if not ex:
             continue
         ex_lines.append(f"Example {i}:\n{ex}")
-        if i >= 3:  # keep prompt short
+        if i >= 3:
             break
 
     examples_txt = "\n\n".join(ex_lines) if ex_lines else "(no examples provided)"
@@ -80,9 +75,6 @@ RAW_TEXT:
 
 
 def _parse_json_strict(text: str) -> Dict[str, Any]:
-    """
-    Model should return pure JSON. In case it wraps text, try to extract the first JSON object.
-    """
     t = (text or "").strip()
     if not t:
         raise ValueError("Empty response")
@@ -118,7 +110,7 @@ def _ensure_fields(obj: Dict[str, Any]) -> Dict[str, str]:
 def _client():
     """
     FAIL-FAST client: by default no retries and short timeout.
-    This prevents 429 from blocking cron for 20s+ due to auto-retry.
+    This prevents 429 from blocking cron for long due to auto-retry.
     """
     from openai import OpenAI
 
@@ -130,6 +122,11 @@ def _client():
         max_retries=max_retries,
         timeout=timeout,
     )
+
+
+def _is_unsupported_param_error(e: Exception, param_name: str) -> bool:
+    msg = f"{e}"
+    return ("Unsupported parameter" in msg) and (f"'{param_name}'" in msg or f'"{param_name}"' in msg)
 
 
 def rewrite_with_openai(
@@ -149,7 +146,7 @@ def rewrite_with_openai(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY missing")
 
-    model_name = (model or _env("OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-5-nano"
+    model_name = (model or _env("OPENAI_MODEL", "gpt-4o-mini")).strip() or "gpt-4o-mini"
 
     messages = _build_messages(
         topic_or_keyword=(topic_or_keyword or "").strip(),
@@ -159,26 +156,45 @@ def rewrite_with_openai(
         style_examples=style_examples or [],
     )
 
-    max_tokens = _env_int("OPENAI_MAX_TOKENS", 450)
+    max_out = _env_int("OPENAI_MAX_TOKENS", 450)
     temperature = _env_float("OPENAI_TEMPERATURE", 0.4)
 
     c = _client()
-    resp = c.chat.completions.create(
+
+    base_kwargs: Dict[str, Any] = dict(
         model=model_name,
         messages=messages,
         temperature=temperature,
-        max_tokens=max_tokens,
         response_format={"type": "json_object"},
     )
 
-    text = resp.choices[0].message.content or ""
-    obj = _parse_json_strict(text)
-    out = _ensure_fields(obj)
+    # Prefer max_completion_tokens first (newer models), fallback to max_tokens if needed.
+    try_orders = [
+        ("max_completion_tokens", max_out),
+        ("max_tokens", max_out),
+    ]
 
-    if not out["title"] and not out["draft"]:
-        raise ValueError("Model returned empty output")
+    last_err: Optional[Exception] = None
+    for token_param, token_value in try_orders:
+        kwargs = dict(base_kwargs)
+        kwargs[token_param] = token_value
+        try:
+            resp = c.chat.completions.create(**kwargs)
+            text = resp.choices[0].message.content or ""
+            obj = _parse_json_strict(text)
+            out = _ensure_fields(obj)
+            if not out["title"] and not out["draft"]:
+                raise ValueError("Model returned empty output")
+            return out
+        except Exception as e:
+            last_err = e
+            # Only fallback to the other token param when it's clearly unsupported-parameter
+            if _is_unsupported_param_error(e, token_param):
+                continue
+            raise
 
-    return out
+    assert last_err is not None
+    raise last_err
 
 
 if __name__ == "__main__":
