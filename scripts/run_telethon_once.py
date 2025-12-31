@@ -6,7 +6,6 @@ import dataclasses
 import inspect
 import logging
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -149,6 +148,29 @@ def _extract_admin_rules(cfg_admin: Any) -> Tuple[List[str], Dict[str, str], Dic
     return _normalize_keywords(kw_list), kw_to_topic, kw_to_style, styles_clean
 
 
+def _get_signature_from_styles(styles: Dict[str, List[str]]) -> str:
+    """
+    Convention: if styles tab contains a row style_name="signature",
+    we treat its first example line as a signature appended to Draft (styled).
+    """
+    sig_lines = styles.get("signature") or styles.get("SIGNATURE") or []
+    sig = (sig_lines[0] if sig_lines else "").strip()
+    return sig
+
+
+def _ensure_signature(draft: str, signature: str) -> str:
+    signature = (signature or "").strip()
+    if not signature:
+        return draft
+    d = (draft or "").strip()
+    if not d:
+        return d
+    # If signature already appears anywhere, don't duplicate
+    if signature in d:
+        return d
+    return f"{d}\n\n{signature}".strip()
+
+
 def _draft_to_sheets_item(
     d: Any,
     *,
@@ -159,6 +181,7 @@ def _draft_to_sheets_item(
     fallback_title: str,
     fallback_link: str,
     raw_text: str,
+    signature: str,
 ) -> Mapping[str, object]:
     """
     IMPORTANT: must match src/news_agent/pipeline/sheets.py expectations:
@@ -173,17 +196,19 @@ def _draft_to_sheets_item(
 
     title = (dct.get("title") or dct.get("headline") or fallback_title or "").strip()
 
-    # AI writer uses "summary_facts" (string with bullets)
+    # AI writer returns "summary_facts" as a BULLET STRING (lines starting with "- ")
     summary = dct.get("summary_bullets") or dct.get("summary") or dct.get("summary_facts") or dct.get("bullets")
     if isinstance(summary, str):
-        summary_bullets = [x.strip("-• \t") for x in summary.splitlines() if x.strip()]
+        # KEEP bullets exactly (do NOT strip "-")
+        summary_bullets = [x.rstrip() for x in summary.splitlines() if x.strip()]
     elif isinstance(summary, list):
-        summary_bullets = [str(x).strip() for x in summary if str(x).strip()]
+        summary_bullets = [str(x).rstrip() for x in summary if str(x).strip()]
     else:
         summary_bullets = []
 
-    # AI writer uses "draft" (string)
+    # AI writer returns "draft" as string; sheets.py reads "styled_draft"
     styled_draft = (dct.get("draft") or dct.get("text") or dct.get("content") or "").strip()
+    styled_draft = _ensure_signature(styled_draft, signature)
 
     link = (dct.get("link") or dct.get("source") or dct.get("url") or fallback_link or "").strip()
 
@@ -264,7 +289,12 @@ async def run_once() -> int:
 
     admin_sheet_id = _env("ADMIN_CONFIG_SHEET_ID")
     if admin_sheet_id:
-        cfg_admin = load_admin_config(admin_sheet_id, channels_tab="channels", keywords_tab="keywords", styles_tab="styles")
+        cfg_admin = load_admin_config(
+            admin_sheet_id,
+            channels_tab="channels",
+            keywords_tab="keywords",
+            styles_tab="styles",
+        )
         channels = list(getattr(cfg_admin, "channels", []) or [])
         keywords, kw_to_topic, kw_to_style, styles = _extract_admin_rules(cfg_admin)
         admin = True
@@ -272,6 +302,8 @@ async def run_once() -> int:
         channels = [x.strip() for x in (_env("CHANNELS", "") or "").split(",") if x.strip()]
         keywords = _normalize_keywords([x for x in (_env("KEYWORDS", "") or "").split(",") if x.strip()])
         styles = {"telegram_casual": ["Tóm tắt nhanh, dễ đọc."]}
+
+    signature = _get_signature_from_styles(styles)
 
     channels = [c.strip() for c in channels if c.strip()]
     if not channels:
@@ -294,6 +326,7 @@ async def run_once() -> int:
         if openai_enabled and max_ai_items > 0:
             try:
                 from news_agent.pipeline.ai_writer import write_draft as _write_draft
+
                 write_draft = _write_draft
             except Exception:
                 log.exception("AI import failed -> continue without AI")
@@ -326,14 +359,14 @@ async def run_once() -> int:
 
                 now_iso = datetime.now(timezone.utc).isoformat()
 
-                # Default non-AI item (already aligned with sheets.py schema)
+                # Default non-AI item (aligned with sheets.py schema)
                 base_row: Dict[str, object] = {
                     "timestamp": now_iso,
                     "source": "telegram",
                     "matched_keyword": kw,
                     "title": text[:120],
                     "summary_bullets": [text[:240]],
-                    "styled_draft": text,
+                    "styled_draft": text,  # fallback = raw
                     "link": link,
                     "status": "DRAFT",
                     "item_id": f"{_safe_channel_slug(ch)}:{msg.id}",
@@ -359,6 +392,7 @@ async def run_once() -> int:
                             fallback_title=str(base_row["title"]),
                             fallback_link=link,
                             raw_text=text,
+                            signature=signature,
                         )
                         drafted_rows.append(ai_item)
                         continue
