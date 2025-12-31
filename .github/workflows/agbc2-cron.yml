@@ -42,8 +42,8 @@ jobs:
       # OpenAI:
       # - Scheduled cron runs: ALWAYS OFF by default (stable pipeline, no quota noise)
       # - workflow_dispatch runs: controllable via inputs
-      OPENAI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_enabled || '0' }}
-      MAX_AI_ITEMS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_ai_items || '0' }}
+      OPENAI_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.openai_enabled || '1' }}
+      MAX_AI_ITEMS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_ai_items || '2' }}
 
       # OpenAI credentials/model can stay as secrets; they won't be used when OPENAI_ENABLED=0
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
