@@ -42,7 +42,7 @@ jobs:
       GSPREAD_SA_JSON_B64: ${{ secrets.GSPREAD_SA_JSON_B64 }}
       GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
       ADMIN_CONFIG_SHEET_ID: ${{ secrets.ADMIN_CONFIG_SHEET_ID }}
-      GOOGLE_SHEET_TAB: ${{ github.event_name == 'workflow_dispatch' && inputs.sheet_tab || 'AGBC2 – News Draft' }}
+      GOOGLE_SHEET_TAB: ${{ github.event_name == 'workflow_dispatch' && inputs.sheet_tab || 'CONTENTAI' }}
 
       # OpenAI:
       # - Scheduled cron runs: ALWAYS OFF by default (stable pipeline, no quota noise)
